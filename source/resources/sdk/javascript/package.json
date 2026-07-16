@@ -1,0 +1,9 @@
+{
+  "name": "@cta/node-sdk",
+  "version": "1.0.0",
+  "private": true,
+  "main": "cta-client.js",
+  "dependencies": {
+    "cbor-x": "^1.6.0"
+  }
+}

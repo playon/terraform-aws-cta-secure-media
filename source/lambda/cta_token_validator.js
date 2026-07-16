@@ -1,0 +1,160 @@
+/**
+ * CTA-5007-B CloudFront Function with Hybrid Token Renewal
+ * Supports path→header token transition for streaming players
+ *
+ * Requires CloudFront Functions JavaScript runtime 2.0
+ */
+
+import cf from 'cloudfront';
+
+var CTA = {
+    EXP: "4",           // Expiration
+    NBF: "5",           // Not Before  
+    IAT: "6",           // Issued At
+    CTI: "7",           // Token ID
+    CATNIP: "402",      // Network IP (per CloudFront docs)
+    CATU: "401",        // URI restrictions (per CloudFront docs)
+    CATGEOISO3166: "316" // Country codes
+};
+
+// catu sub-claim keys per AWS docs
+var Catu = {
+    HOST: "1",
+    PATH: "2",
+    EXT: "3"
+};
+
+var CatuMatch = {
+    PREFIX: "1",
+    SUFFIX: "2",
+    EXACT: "3"
+};
+
+function extractPathToken(request) {
+    var segments = request.uri.split('/');
+    if (segments[1] && segments[1].length > 50) {
+        return segments[1];
+    }
+    return null;
+}
+
+function validateClaims(payload, request, viewerIp) {
+    var now = Math.floor(Date.now() / 1000);
+    
+    if (payload[CTA.EXP] && now > payload[CTA.EXP]) {
+        throw new Error("expired");
+    }
+    
+    if (payload[CTA.NBF] && now < payload[CTA.NBF]) {
+        throw new Error("not_yet_valid");
+    }
+    
+    // URI path validation (catu → path → prefix_match)
+    if (payload[CTA.CATU] && payload[CTA.CATU][Catu.PATH] && payload[CTA.CATU][Catu.PATH][CatuMatch.PREFIX]) {
+        if (!request.uri.startsWith(payload[CTA.CATU][Catu.PATH][CatuMatch.PREFIX])) {
+            throw new Error("uri_not_allowed");
+        }
+    }
+    
+    // Country validation (catgeoiso3166)
+    if (payload[CTA.CATGEOISO3166]) {
+        var country = request.headers["cloudfront-viewer-country"];
+        if (!country || payload[CTA.CATGEOISO3166].indexOf(country.value.toLowerCase()) === -1) {
+            throw new Error("geo_restricted");
+        }
+    }
+    
+    // IP validation (catnip — claim 402)
+    // event.viewer.ip is available in CloudFront Functions JS 2.0
+    if (payload[CTA.CATNIP] && viewerIp) {
+        var allowed = payload[CTA.CATNIP];
+        var ipMatch = false;
+        for (var i = 0; i < allowed.length; i++) {
+            if (allowed[i] === viewerIp) {
+                ipMatch = true;
+                break;
+            }
+        }
+        if (!ipMatch) {
+            throw new Error("ip_restricted");
+        }
+    }
+}
+
+async function handler(event) {
+    try {
+        var request = event.request;
+        
+        // Handle CORS preflight
+        if (request.method === 'OPTIONS') {
+            return {
+                statusCode: 204,
+                headers: {
+                    'access-control-allow-origin': { value: '*' },
+                    'access-control-allow-methods': { value: 'GET, HEAD, OPTIONS' },
+                    'access-control-allow-headers': { value: 'CTA-Common-Access-Token' },
+                    'access-control-max-age': { value: '86400' }
+                }
+            };
+        }
+        
+        // /website/* and /api/* are handled by separate behaviors
+        // Default behavior only gets token-protected content requests
+        
+        var kvs = cf.kvs();
+        var signingKey = await kvs.get("key:default");
+        var token = null;
+        var payload = null;
+        
+        // Try header token first
+        if (request.headers["cta-common-access-token"]) {
+            token = request.headers["cta-common-access-token"].value;
+            var cwt = cf.cwt.validateToken(Buffer.from(token, 'base64url'), { key: signingKey });
+            payload = cwt.payload;
+        }
+        // Try query parameter token (?CAT=...)
+        else if (request.querystring["CAT"]) {
+            token = request.querystring["CAT"].value;
+            var cwt = cf.cwt.validateToken(Buffer.from(token, 'base64url'), { key: signingKey });
+            payload = cwt.payload;
+            delete request.querystring["CAT"];
+        }
+        // Fallback to path token
+        else {
+            token = extractPathToken(request);
+            if (!token) {
+                return { statusCode: 401, body: "missing_token" };
+            }
+            
+            var cwt = cf.cwt.validateToken(Buffer.from(token, 'base64url'), { key: signingKey });
+            payload = cwt.payload;
+            
+            // Strip token from path before sending to origin
+            var segments = request.uri.split('/');
+            segments.splice(1, 1);
+            request.uri = segments.join('/') || '/';
+        }
+        
+        // Check revocation
+        if (payload[CTA.CTI]) {
+            try {
+                var cti = String(payload[CTA.CTI]);
+                var revoked = await kvs.get("revoked:" + cti);
+                if (revoked) {
+                    return { statusCode: 401, body: "token_revoked" };
+                }
+            } catch (e) {
+                // Key not found in KVS means not revoked — continue
+            }
+        }
+        
+        // Validate claims
+        validateClaims(payload, request, event.viewer.ip);
+        
+        // Forward request to origin
+        return request;
+        
+    } catch (e) {
+        return { statusCode: 401, body: e.message };
+    }
+}

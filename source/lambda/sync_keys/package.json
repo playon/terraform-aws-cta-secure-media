@@ -1,0 +1,10 @@
+{
+  "name": "sync-keys-to-kvs",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@aws-sdk/client-cloudfront-keyvaluestore": "^3.622.0",
+    "@aws-sdk/client-secrets-manager": "^3.622.0",
+    "@aws-sdk/signature-v4-crt": "^3.622.0"
+  }
+}

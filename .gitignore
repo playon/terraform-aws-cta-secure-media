@@ -1,0 +1,18 @@
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfplan.*
+crash.log
+
+# Lambda build artifacts
+source/**/node_modules/
+source/**/.jest-cache/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

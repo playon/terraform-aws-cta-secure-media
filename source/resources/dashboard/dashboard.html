@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CTA Auto-Revocation Dashboard</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Amazon Ember Display', 'Helvetica Neue', Arial, sans-serif; color: #161b26; background: #f3f3f7; }
+        .hero { background: linear-gradient(180deg, rgba(255,255,255,0.25) 0%, rgba(255,255,255,0.75) 50%, #fff 100%), conic-gradient(from 180deg at 50% 100%, #ff6b6b 40%, #f299ff 50%, #75cfff 60%); padding: 48px 120px 32px; }
+        .hero h1 { font-size: 36px; font-weight: 700; }
+        .hero p { font-size: 16px; color: #232b37; margin-top: 8px; }
+        .hero a { color: #161b26; font-weight: 600; }
+        .section { background: #fff; padding: 32px 120px; }
+        .stats { display: flex; gap: 24px; margin-bottom: 24px; }
+        .stat { background: #f8f8fa; border: 1px solid #e9ebed; border-radius: 8px; padding: 20px; flex: 1; }
+        .stat .num { font-size: 32px; font-weight: 700; }
+        .stat .label { font-size: 13px; color: #6b7280; margin-top: 4px; }
+        table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        th { text-align: left; padding: 10px 12px; background: #f3f3f7; font-weight: 600; border-bottom: 2px solid #e9ebed; }
+        td { padding: 10px 12px; border-bottom: 1px solid #e9ebed; }
+        tr:hover td { background: #f8f8fa; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+        .badge-auto { background: #fee2e2; color: #dc2626; }
+        .badge-manual { background: #e8f4fd; color: #1d4ed8; }
+        .empty { text-align: center; padding: 40px; color: #6b7280; }
+        .refresh { padding: 8px 16px; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; cursor: pointer; font-family: inherit; font-size: 13px; font-weight: 600; }
+        .refresh:hover { background: #f3f3f7; }
+        .header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+        @media (max-width: 900px) { .hero, .section { padding-left: 24px; padding-right: 24px; } .stats { flex-direction: column; } }
+    </style>
+</head>
+<body>
+
+<div class="hero">
+    <h1>🛡️ Auto-Revocation Dashboard</h1>
+    <p>Real-time session revocation powered by Kinesis + <a href="https://aws.amazon.com/nova/" target="_blank" rel="noopener">Bedrock Nova Lite</a> &nbsp;·&nbsp; <a href="index.html">← Back to Demo</a></p>
+</div>
+
+<div class="section">
+    <div class="stats">
+        <div class="stat">
+            <div class="num" id="totalRevoked">—</div>
+            <div class="label">Total Revoked Sessions</div>
+        </div>
+        <div class="stat">
+            <div class="num" id="autoRevoked">—</div>
+            <div class="label">Auto-Revoked (Bedrock)</div>
+        </div>
+        <div class="stat">
+            <div class="num" id="manualRevoked">—</div>
+            <div class="label">Manually Revoked</div>
+        </div>
+    </div>
+
+    <div class="header-row">
+        <h2>Revoked Sessions</h2>
+        <button class="refresh" onclick="loadData()">↻ Refresh</button>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Session ID</th>
+                <th>Reason</th>
+                <th>Revoked At</th>
+            </tr>
+        </thead>
+        <tbody id="tableBody">
+            <tr><td colspan="3" class="empty">Loading...</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<div class="section" id="promptSection" style="display:none">
+    <div class="header-row">
+        <h2>Bedrock Analysis Prompt</h2>
+        <div>
+            <button class="refresh" onclick="savePrompt()">💾 Save</button>
+            <button class="refresh" onclick="loadPrompt()">↻ Reset</button>
+        </div>
+    </div>
+    <p style="font-size:13px;color:#6b7280;margin-bottom:12px">Edit the prompt used by Bedrock Nova Lite to analyze suspicious sessions. Session data is appended automatically.</p>
+    <textarea id="promptEditor" style="width:100%;height:300px;font-family:'Amazon Ember Mono',monospace;font-size:13px;padding:12px;border:1px solid #d1d5db;border-radius:8px;resize:vertical;line-height:1.5"></textarea>
+    <div id="promptStatus" style="font-size:13px;margin-top:8px;color:#6b7280"></div>
+</div>
+
+<script src="config.js"></script>
+<script src="prompt-config.js" onerror=""></script>
+<script>
+const API = window.CTA_CONFIG?.apiEndpoint || '';
+const PROMPT_API = window.PROMPT_CONFIG?.apiEndpoint || '';
+
+async function loadData() {
+    try {
+        const resp = await fetch(API + '/revoked');
+        const data = await resp.json();
+        const revoked = data.revoked || [];
+
+        document.getElementById('totalRevoked').textContent = revoked.length;
+        document.getElementById('autoRevoked').textContent = revoked.filter(r => r.reason.startsWith('auto')).length;
+        document.getElementById('manualRevoked').textContent = revoked.filter(r => r.reason === 'manual').length;
+
+        const tbody = document.getElementById('tableBody');
+        if (revoked.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="3" class="empty">No revoked sessions</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = revoked.map(r => `
+            <tr>
+                <td><code>${r.sessionId}</code></td>
+                <td><span class="badge ${r.reason.startsWith('auto') ? 'badge-auto' : 'badge-manual'}">${r.reason}</span></td>
+                <td>${r.revokedAt ? new Date(r.revokedAt * 1000).toLocaleString() : '—'}</td>
+            </tr>
+        `).join('');
+    } catch (err) {
+        document.getElementById('tableBody').innerHTML = `<tr><td colspan="3" class="empty">Error: ${err.message}</td></tr>`;
+    }
+}
+
+loadData();
+setInterval(loadData, 15000);
+
+// Prompt editor (only visible if prompt API is configured)
+async function loadPrompt() {
+    if (!PROMPT_API) return;
+    try {
+        const resp = await fetch(PROMPT_API + '/prompt');
+        const data = await resp.json();
+        document.getElementById('promptEditor').value = data.prompt || '';
+        document.getElementById('promptStatus').textContent = 'Loaded';
+    } catch (err) {
+        document.getElementById('promptStatus').textContent = 'Error loading: ' + err.message;
+    }
+}
+
+async function savePrompt() {
+    if (!PROMPT_API) return;
+    try {
+        const prompt = document.getElementById('promptEditor').value;
+        const resp = await fetch(PROMPT_API + '/prompt', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt })
+        });
+        const data = await resp.json();
+        document.getElementById('promptStatus').textContent = data.success ? '✅ Saved — takes effect on next analysis cycle' : 'Error: ' + data.error;
+    } catch (err) {
+        document.getElementById('promptStatus').textContent = 'Error saving: ' + err.message;
+    }
+}
+
+if (PROMPT_API) {
+    document.getElementById('promptSection').style.display = '';
+    loadPrompt();
+}
+</script>
+</body>
+</html>
