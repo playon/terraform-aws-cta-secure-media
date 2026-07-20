@@ -1,8 +1,11 @@
 # API Gateway REST API — token mint (Node/Python/Ruby), revoke, list-revoked.
-#
-# The CDK stack disables the auto-created AWS::ApiGateway::Account resource
-# (SCP blocks apigateway:PATCH on /account). TF's aws_api_gateway_rest_api
-# does NOT create an Account resource, so we don't need the workaround.
+
+locals {
+  # When token_authorized_role_arn is set, POST /token requires SigV4-signed
+  # requests from that specific role (IAM auth + resource policy). Anonymous
+  # POSTs return 403. Empty string preserves the reference-solution shape.
+  token_authorization = var.token_authorized_role_arn != "" ? "AWS_IAM" : "NONE"
+}
 
 resource "aws_api_gateway_rest_api" "this" {
   name        = "${local.name_prefix}-${local.environment}"
@@ -11,6 +14,35 @@ resource "aws_api_gateway_rest_api" "this" {
   endpoint_configuration {
     types = ["EDGE"]
   }
+
+  # Resource policy pins invoke on POST /token to the configured role.
+  # Other routes stay open on the resource-policy dimension (the module
+  # doesn't attempt to lock /revoke or /revoked — adopters can layer
+  # additional policy if needed).
+  policy = var.token_authorized_role_arn == "" ? null : jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "AllowAuthorizedRoleToMint"
+        Effect    = "Allow"
+        Principal = { AWS = var.token_authorized_role_arn }
+        Action    = "execute-api:Invoke"
+        Resource  = "execute-api:/*/POST/token"
+      },
+      {
+        Sid       = "AllowAnyToOtherRoutes"
+        Effect    = "Allow"
+        Principal = "*"
+        Action    = "execute-api:Invoke"
+        Resource = [
+          "execute-api:/*/POST/revoke",
+          "execute-api:/*/GET/revoked",
+          "execute-api:/*/POST/token-python",
+          "execute-api:/*/POST/token-ruby",
+        ]
+      },
+    ]
+  })
 }
 
 # --- /token → generator (Node) -----------------------------------------
@@ -25,7 +57,7 @@ resource "aws_api_gateway_method" "token_post" {
   rest_api_id   = aws_api_gateway_rest_api.this.id
   resource_id   = aws_api_gateway_resource.token.id
   http_method   = "POST"
-  authorization = "NONE"
+  authorization = local.token_authorization
 }
 
 resource "aws_api_gateway_integration" "token_post" {
@@ -178,12 +210,15 @@ resource "aws_lambda_permission" "revoked_apigw" {
 resource "aws_api_gateway_deployment" "this" {
   rest_api_id = aws_api_gateway_rest_api.this.id
 
-  # Triggers redeploy on any change to routes/methods/integrations. Hash
-  # all references so any addition/removal here forces a new deployment.
+  # Triggers redeploy on any change to routes/methods/integrations, plus
+  # the REST API policy + token method authorization so flipping IAM auth
+  # forces a fresh deployment out to the stage.
   triggers = {
     redeployment = sha1(jsonencode([
+      aws_api_gateway_rest_api.this.policy,
       aws_api_gateway_resource.token.id,
       aws_api_gateway_method.token_post.id,
+      aws_api_gateway_method.token_post.authorization,
       aws_api_gateway_integration.token_post.id,
       aws_api_gateway_resource.token_python.id,
       aws_api_gateway_method.token_python_post.id,

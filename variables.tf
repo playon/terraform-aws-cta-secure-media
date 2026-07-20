@@ -52,3 +52,10 @@ variable "token_rate_limit_per_5min" {
   default     = 300
   nullable    = false
 }
+
+variable "token_authorized_role_arn" {
+  type        = string
+  description = "IAM role ARN allowed to invoke POST /api/token. When set, the token route flips to AWS_IAM authorization and the REST API resource policy restricts invoke to this role only; anonymous POSTs return 403. Empty preserves reference behavior (authorization = NONE, any caller can mint). Recommended for prod: a dedicated service role that fronts your entitlement checks."
+  default     = ""
+  nullable    = false
+}

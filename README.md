@@ -52,6 +52,7 @@ See [`examples/basic/`](examples/basic/) for a full worked example.
 | `rotation_schedule` | EventBridge schedule for the rotation Step Function. | `string` | `"rate(30 days)"` |
 | `secret_recovery_window_days` | Secrets Manager recovery window. 0 = destroy immediately (dev/stage); 7-30 = undo window (prod). | `number` | `0` |
 | `token_rate_limit_per_5min` | WAFv2 rate-based rule limit for `POST /api/token` per source IP, per 5-min window. | `number` | `300` |
+| `token_authorized_role_arn` | IAM role ARN allowed to invoke `POST /api/token`. When set, the route flips to `AWS_IAM` authorization and only SigV4-signed calls from this role reach the mint. Empty preserves reference behavior (anyone can mint). | `string` | `""` |
 
 ## Outputs
 
