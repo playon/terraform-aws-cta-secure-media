@@ -53,6 +53,8 @@ See [`examples/basic/`](examples/basic/) for a full worked example.
 | `secret_recovery_window_days` | Secrets Manager recovery window. 0 = destroy immediately (dev/stage); 7-30 = undo window (prod). | `number` | `0` |
 | `token_rate_limit_per_5min` | WAFv2 rate-based rule limit for `POST /api/token` per source IP, per 5-min window. | `number` | `300` |
 | `token_authorized_role_arn` | IAM role ARN allowed to invoke `POST /api/token`. When set, the route flips to `AWS_IAM` authorization and only SigV4-signed calls from this role reach the mint. Empty preserves reference behavior (anyone can mint). | `string` | `""` |
+| `token_validation_enabled` | Master switch for CTA validation at the edge. `false` = break-glass bypass; the validator forwards every request without inspecting the token. Baked at deploy time — flipping requires a TF apply. | `bool` | `true` |
+| `geo_validation_enabled` | Enforce geo restrictions at the edge (`catgeoiso3166` today; zip/DMA extension per VID-3450). Other claim checks (URI/IP/exp/nbf/revocation) run regardless. | `bool` | `true` |
 
 ## Outputs
 

@@ -53,6 +53,20 @@ variable "token_rate_limit_per_5min" {
   nullable    = false
 }
 
+variable "token_validation_enabled" {
+  type        = bool
+  description = "Master switch for CTA token validation at the edge. When false, the validator forwards every viewer request without inspecting the token — a break-glass bypass for staged rollout or incident response. Baked into the CloudFront Function at deploy time; flipping requires a Terraform apply."
+  default     = true
+  nullable    = false
+}
+
+variable "geo_validation_enabled" {
+  type        = bool
+  description = "Enforce geo restrictions at the edge. When false, the catgeoiso3166 country claim is not checked (future zip/DMA edge checks — see VID-3450 — will live under the same flag). Other claim checks (URI/IP/exp/nbf/revocation) still run. Baked in at deploy time."
+  default     = true
+  nullable    = false
+}
+
 variable "token_authorized_role_arn" {
   type        = string
   description = "IAM role ARN allowed to invoke POST /api/token. When set, the token route flips to AWS_IAM authorization and the REST API resource policy restricts invoke to this role only; anonymous POSTs return 403. Empty preserves reference behavior (authorization = NONE, any caller can mint). Recommended for prod: a dedicated service role that fronts your entitlement checks."
