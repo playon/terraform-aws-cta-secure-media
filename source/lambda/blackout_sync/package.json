@@ -1,0 +1,14 @@
+{
+  "name": "cta-blackout-sync",
+  "version": "1.0.0",
+  "description": "Mirror unity-api DMA blackout rules into CloudFront KVS. VID-3459.",
+  "main": "index.js",
+  "private": true,
+  "scripts": {
+    "test": "node --test __tests__/*.test.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cloudfront-keyvaluestore": "^3.699.0",
+    "@aws-sdk/signature-v4-crt": "^3.699.0"
+  }
+}

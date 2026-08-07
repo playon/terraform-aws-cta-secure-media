@@ -1,44 +1,67 @@
-# API Gateway REST API — token mint (Node/Python/Ruby), revoke, list-revoked.
+# API Gateway REST API — token mint (Node), revoke, list-revoked.
+#
+# The CDK stack disables the auto-created AWS::ApiGateway::Account resource
+# (SCP blocks apigateway:PATCH on /account). TF's aws_api_gateway_rest_api
+# does NOT create an Account resource, so we don't need the workaround.
+#
+# VID-3449: POST /token is IAM-gated when var.drm_api_lambda_role_arn is
+# set. In stage, the drm-api-lambda execution role becomes the only
+# principal allowed to mint tokens — no anonymous mint surface exists.
 
 locals {
-  # When token_authorized_role_arn is set, POST /token requires SigV4-signed
-  # requests from that specific role (IAM auth + resource policy). Anonymous
-  # POSTs return 403. Empty string preserves the reference-solution shape.
-  token_authorization = var.token_authorized_role_arn != "" ? "AWS_IAM" : "NONE"
+  # Present the token route with AWS_IAM auth when a caller ARN is
+  # configured. Reference-solution behavior (NONE) is preserved for envs
+  # that don't set the variable, so this stays a safe roll-out toggle.
+  token_authorization = var.drm_api_lambda_role_arn != "" ? "AWS_IAM" : "NONE"
 }
 
 resource "aws_api_gateway_rest_api" "this" {
   name        = "${local.name_prefix}-${local.environment}"
-  description = "CTA Token API."
+  description = "CTA Token API. VID-3439."
 
   endpoint_configuration {
     types = ["EDGE"]
   }
 
-  # Resource policy pins invoke on POST /token to the configured role.
-  # Other routes stay open on the resource-policy dimension (the module
-  # doesn't attempt to lock /revoke or /revoked — adopters can layer
-  # additional policy if needed).
-  policy = var.token_authorized_role_arn == "" ? null : jsonencode({
+  # VID-3484 follow-up: policy moved to aws_api_gateway_rest_api_policy.this
+  # so its Resource strings can reference this API's .id. TF disallows
+  # self-references inside a resource's own attributes, but not from a
+  # separate resource that depends on this one. The prior VID-3484 merge
+  # (#26) shipped the self-referencing inline `policy` and broke plan;
+  # this PR completes the migration to a separate policy resource.
+}
+
+# VID-3449 (rehomed by VID-3484): resource policy restricts invoke on
+# POST /token to the drm-api-lambda role. AWS_IAM auth on the method +
+# this policy = only calls signed by that role's temporary creds reach
+# the integration. /revoke and /revoked stay open on the resource-policy
+# dimension (they're still individually AuthN'd if we add that later).
+#
+# Full-ARN Resource strings match what AWS stores — the service accepts
+# either the short form `execute-api:/*/...` or the full ARN as input,
+# but normalizes to the full ARN on write-back. Writing the full form
+# ourselves makes desired == stored, no cosmetic drift on every plan.
+resource "aws_api_gateway_rest_api_policy" "this" {
+  count       = var.drm_api_lambda_role_arn == "" ? 0 : 1
+  rest_api_id = aws_api_gateway_rest_api.this.id
+  policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Sid       = "AllowAuthorizedRoleToMint"
+        Sid       = "AllowDrmApiLambdaToMint"
         Effect    = "Allow"
-        Principal = { AWS = var.token_authorized_role_arn }
+        Principal = { AWS = var.drm_api_lambda_role_arn }
         Action    = "execute-api:Invoke"
-        Resource  = "execute-api:/*/POST/token"
+        Resource  = "arn:aws:execute-api:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:${aws_api_gateway_rest_api.this.id}/*/POST/token"
       },
       {
-        Sid       = "AllowAnyToOtherRoutes"
+        Sid       = "AllowAnyToRevocationEndpoints"
         Effect    = "Allow"
         Principal = "*"
         Action    = "execute-api:Invoke"
         Resource = [
-          "execute-api:/*/POST/revoke",
-          "execute-api:/*/GET/revoked",
-          "execute-api:/*/POST/token-python",
-          "execute-api:/*/POST/token-ruby",
+          "arn:aws:execute-api:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:${aws_api_gateway_rest_api.this.id}/*/POST/revoke",
+          "arn:aws:execute-api:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:${aws_api_gateway_rest_api.this.id}/*/GET/revoked",
         ]
       },
     ]
@@ -75,70 +98,6 @@ resource "aws_lambda_permission" "token_apigw" {
   function_name = aws_lambda_function.generator.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_api_gateway_rest_api.this.execution_arn}/*/POST/token"
-}
-
-# --- /token-python -----------------------------------------------------
-
-resource "aws_api_gateway_resource" "token_python" {
-  rest_api_id = aws_api_gateway_rest_api.this.id
-  parent_id   = aws_api_gateway_rest_api.this.root_resource_id
-  path_part   = "token-python"
-}
-
-resource "aws_api_gateway_method" "token_python_post" {
-  rest_api_id   = aws_api_gateway_rest_api.this.id
-  resource_id   = aws_api_gateway_resource.token_python.id
-  http_method   = "POST"
-  authorization = "NONE"
-}
-
-resource "aws_api_gateway_integration" "token_python_post" {
-  rest_api_id             = aws_api_gateway_rest_api.this.id
-  resource_id             = aws_api_gateway_resource.token_python.id
-  http_method             = aws_api_gateway_method.token_python_post.http_method
-  integration_http_method = "POST"
-  type                    = "AWS_PROXY"
-  uri                     = aws_lambda_function.generator_python.invoke_arn
-}
-
-resource "aws_lambda_permission" "token_python_apigw" {
-  statement_id  = "AllowAPIGatewayInvokeTokenPython"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.generator_python.function_name
-  principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_api_gateway_rest_api.this.execution_arn}/*/POST/token-python"
-}
-
-# --- /token-ruby -------------------------------------------------------
-
-resource "aws_api_gateway_resource" "token_ruby" {
-  rest_api_id = aws_api_gateway_rest_api.this.id
-  parent_id   = aws_api_gateway_rest_api.this.root_resource_id
-  path_part   = "token-ruby"
-}
-
-resource "aws_api_gateway_method" "token_ruby_post" {
-  rest_api_id   = aws_api_gateway_rest_api.this.id
-  resource_id   = aws_api_gateway_resource.token_ruby.id
-  http_method   = "POST"
-  authorization = "NONE"
-}
-
-resource "aws_api_gateway_integration" "token_ruby_post" {
-  rest_api_id             = aws_api_gateway_rest_api.this.id
-  resource_id             = aws_api_gateway_resource.token_ruby.id
-  http_method             = aws_api_gateway_method.token_ruby_post.http_method
-  integration_http_method = "POST"
-  type                    = "AWS_PROXY"
-  uri                     = aws_lambda_function.generator_ruby.invoke_arn
-}
-
-resource "aws_lambda_permission" "token_ruby_apigw" {
-  statement_id  = "AllowAPIGatewayInvokeTokenRuby"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.generator_ruby.function_name
-  principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_api_gateway_rest_api.this.execution_arn}/*/POST/token-ruby"
 }
 
 # --- /revoke -----------------------------------------------------------
@@ -210,22 +169,24 @@ resource "aws_lambda_permission" "revoked_apigw" {
 resource "aws_api_gateway_deployment" "this" {
   rest_api_id = aws_api_gateway_rest_api.this.id
 
-  # Triggers redeploy on any change to routes/methods/integrations, plus
-  # the REST API policy + token method authorization so flipping IAM auth
-  # forces a fresh deployment out to the stage.
+  # Triggers redeploy on any change to routes/methods/integrations.
+  # Also hash token_post.authorization so flipping VID-3449's AWS_IAM
+  # gate forces a fresh deployment out to the stage.
+  #
+  # Do NOT include aws_api_gateway_rest_api.this.policy here. AWS
+  # normalizes the resource policy JSON on write-back (reorders keys,
+  # rewraps Principal), so sha1(jsonencode([...policy...])) evaluates
+  # differently on plan (config input) vs apply (state read-back),
+  # producing the "Provider produced inconsistent final plan" error
+  # deterministically. Resource policies attach at the API level and
+  # take effect immediately without a deployment, so the trigger was
+  # overzealous — policy changes don't need a stage redeploy anyway.
   triggers = {
     redeployment = sha1(jsonencode([
-      aws_api_gateway_rest_api.this.policy,
       aws_api_gateway_resource.token.id,
       aws_api_gateway_method.token_post.id,
       aws_api_gateway_method.token_post.authorization,
       aws_api_gateway_integration.token_post.id,
-      aws_api_gateway_resource.token_python.id,
-      aws_api_gateway_method.token_python_post.id,
-      aws_api_gateway_integration.token_python_post.id,
-      aws_api_gateway_resource.token_ruby.id,
-      aws_api_gateway_method.token_ruby_post.id,
-      aws_api_gateway_integration.token_ruby_post.id,
       aws_api_gateway_resource.revoke.id,
       aws_api_gateway_method.revoke_post.id,
       aws_api_gateway_integration.revoke_post.id,
@@ -243,5 +204,15 @@ resource "aws_api_gateway_deployment" "this" {
 resource "aws_api_gateway_stage" "prod" {
   rest_api_id   = aws_api_gateway_rest_api.this.id
   deployment_id = aws_api_gateway_deployment.this.id
-  stage_name    = "prod"
+  # The stage_name is the last path segment of the APIGW invoke URL.
+  # The aws-solutions-library-samples reference solution hardcodes it to
+  # "prod" — which reads as "prod stage" regardless of the actual AWS
+  # environment (confusing on non-prod accounts). Parameterize on
+  # environment so the URL path reflects the environment name.
+  #
+  # `stage_name` is `ForceNew`, so changing this value on an existing
+  # deployment destroys+recreates the APIGW stage. Coordinate any
+  # downstream callers (e.g., server-side token minters holding the
+  # invoke URL) with the apply window.
+  stage_name = local.environment
 }

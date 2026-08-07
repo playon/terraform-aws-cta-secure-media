@@ -1,33 +1,31 @@
-# Lambda functions — mint (Node/Python/Ruby), revoke, list-revoked, kvs-cleanup.
+# Lambda functions — mint (Node), revoke, list-revoked, kvs-cleanup.
 # The rotation Lambda (SyncKeysToKvs) lives in rotation.tf next to its
 # Step Functions + EventBridge setup.
 #
-# Note on packaging: archive_file zips the source directory as-is. For
-# the Node lambda, its package.json declares cbor-x + @aws-sdk/* which
-# must be installed BEFORE `terraform apply`. Run `make lambda-deps` at
-# the repo root, or `npm install --omit=dev --prefix source/lambda`
-# manually. Python + Ruby lambdas are stdlib-only.
+# Note on packaging: archive_file zips the source directory as-is. The
+# Node lambda's package.json declares cbor-x + @aws-sdk/* which must be
+# installed BEFORE `terraform apply`. Run `make lambda-deps` at the
+# repo root, or `npm install --omit=dev --prefix source/lambda`
+# manually.
+#
+# VID-3449 removed the /token-python and /token-ruby demo endpoints
+# (SDK samples in the reference solution — no real callers). The Python
+# and Ruby SDK source stays under source/ as documentation for external
+# integrators; only the Lambda + APIGW wiring was dropped.
 
-# --- Zip source directories --------------------------------------------
+# --- Zip source directory ---------------------------------------------
 
 data "archive_file" "lambda_node" {
   type        = "zip"
-  source_dir  = "${path.module}/source/lambda"
+  source_dir  = "${path.module}/../source/lambda"
   output_path = "${path.module}/.terraform/lambda-node.zip"
   # Exclude the sync_keys subdir — it's a separate function.
-  excludes = ["sync_keys/**", ".jest-cache/**", "__tests__/**"]
-}
-
-data "archive_file" "lambda_python" {
-  type        = "zip"
-  source_dir  = "${path.module}/source/lambda-python"
-  output_path = "${path.module}/.terraform/lambda-python.zip"
-}
-
-data "archive_file" "lambda_ruby" {
-  type        = "zip"
-  source_dir  = "${path.module}/source/lambda-ruby"
-  output_path = "${path.module}/.terraform/lambda-ruby.zip"
+  # Exclude *.tftpl — the CTA validator ships as a Terraform template
+  # rendered into the CloudFront Function (main.tf), not a Lambda import.
+  # Without this, the unrendered template with raw ${...} markers gets
+  # zipped into every Node lambda archive, churning source_code_hash
+  # any time the validator changes.
+  excludes = ["sync_keys/**", "blackout_sync/**", ".jest-cache/**", "__tests__/**", "*.tftpl"]
 }
 
 # --- Shared IAM for Lambda logging -------------------------------------
@@ -83,74 +81,6 @@ resource "aws_lambda_function" "generator" {
   }
 }
 
-# --- Token generator (Python) ------------------------------------------
-
-resource "aws_iam_role" "generator_python" {
-  name               = "${local.name_prefix}-${local.environment}-generator-python"
-  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
-}
-
-resource "aws_iam_role_policy_attachment" "generator_python_logs" {
-  role       = aws_iam_role.generator_python.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-}
-
-resource "aws_iam_role_policy" "generator_python_secret_read" {
-  name   = "read-signing-key"
-  role   = aws_iam_role.generator_python.id
-  policy = data.aws_iam_policy_document.generator_secret_read.json
-}
-
-resource "aws_lambda_function" "generator_python" {
-  function_name    = "${local.name_prefix}-${local.environment}-generator-python"
-  role             = aws_iam_role.generator_python.arn
-  runtime          = "python3.13"
-  handler          = "handler.handler"
-  filename         = data.archive_file.lambda_python.output_path
-  source_code_hash = data.archive_file.lambda_python.output_base64sha256
-  timeout          = 10
-
-  environment {
-    variables = {
-      SECRET_NAME = aws_secretsmanager_secret.signing_key.arn
-    }
-  }
-}
-
-# --- Token generator (Ruby) --------------------------------------------
-
-resource "aws_iam_role" "generator_ruby" {
-  name               = "${local.name_prefix}-${local.environment}-generator-ruby"
-  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
-}
-
-resource "aws_iam_role_policy_attachment" "generator_ruby_logs" {
-  role       = aws_iam_role.generator_ruby.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-}
-
-resource "aws_iam_role_policy" "generator_ruby_secret_read" {
-  name   = "read-signing-key"
-  role   = aws_iam_role.generator_ruby.id
-  policy = data.aws_iam_policy_document.generator_secret_read.json
-}
-
-resource "aws_lambda_function" "generator_ruby" {
-  function_name    = "${local.name_prefix}-${local.environment}-generator-ruby"
-  role             = aws_iam_role.generator_ruby.arn
-  runtime          = "ruby3.3"
-  handler          = "handler.handler"
-  filename         = data.archive_file.lambda_ruby.output_path
-  source_code_hash = data.archive_file.lambda_ruby.output_base64sha256
-  timeout          = 10
-
-  environment {
-    variables = {
-      SECRET_NAME = aws_secretsmanager_secret.signing_key.arn
-    }
-  }
-}
-
 # --- Revoker -----------------------------------------------------------
 
 resource "aws_iam_role" "revoker" {
@@ -168,6 +98,20 @@ data "aws_iam_policy_document" "kvs_write" {
     actions = [
       "cloudfront-keyvaluestore:PutKey",
       "cloudfront-keyvaluestore:DescribeKeyValueStore",
+    ]
+    resources = [aws_cloudfront_key_value_store.this.arn]
+  }
+}
+
+# Reconciler needs list + batch update for full-scan reconciliation.
+data "aws_iam_policy_document" "kvs_reconcile" {
+  statement {
+    actions = [
+      "cloudfront-keyvaluestore:DescribeKeyValueStore",
+      "cloudfront-keyvaluestore:ListKeys",
+      "cloudfront-keyvaluestore:PutKey",
+      "cloudfront-keyvaluestore:DeleteKey",
+      "cloudfront-keyvaluestore:UpdateKeys",
     ]
     resources = [aws_cloudfront_key_value_store.this.arn]
   }
@@ -287,7 +231,7 @@ resource "aws_lambda_function" "kvs_cleanup" {
 
 resource "aws_cloudwatch_event_rule" "kvs_cleanup_schedule" {
   name                = "${local.name_prefix}-${local.environment}-kvs-cleanup"
-  description         = "Purge expired KVS revocation entries hourly."
+  description         = "Purge expired KVS revocation entries hourly. VID-3439."
   schedule_expression = "rate(1 hour)"
 }
 

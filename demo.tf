@@ -1,12 +1,21 @@
 # S3 demo bucket + upload of resources/demo-website/.
 #
-# The distribution's /website/* behavior + demo-website origin serve
-# from this bucket. Ported from the CDK reference solution's demo
-# webpage; useful for smoke-testing token flow end-to-end.
+# Currently unconditional — this port covers stage only (per VID-3439
+# ticket scope), and stage always wants the demo. When prod deployment
+# is scoped, add an `enable_demo` variable and gate these resources
+# with `count`; the distribution's /website/* behavior + demo-website
+# origin need matching conditionalization at that time.
+#
+# Dashboard is not included in this port (was optional in the CDK
+# stack too).
 
 resource "aws_s3_bucket" "demo" {
   bucket_prefix = "${local.name_prefix}-${local.environment}-demo-"
-  force_destroy = true
+  # Stage: force_destroy so `terraform destroy` wipes the bucket cleanly.
+  # PROD_TODO: flip to false (or make env-gated) on the prod cutover so
+  # accidental destroys fail loudly rather than silently take down demo
+  # objects. See README "Prod cutover" section.
+  force_destroy = local.environment == "prod" ? false : true
 }
 
 resource "aws_s3_bucket_public_access_block" "demo" {
@@ -48,12 +57,12 @@ resource "aws_s3_bucket_policy" "demo" {
 
 # Upload every file under resources/demo-website/ to s3://<bucket>/website/
 resource "aws_s3_object" "demo_files" {
-  for_each = fileset("${path.module}/source/resources/demo-website", "**/*")
+  for_each = fileset("${path.module}/../source/resources/demo-website", "**/*")
 
   bucket = aws_s3_bucket.demo.id
   key    = "website/${each.value}"
-  source = "${path.module}/source/resources/demo-website/${each.value}"
-  etag   = filemd5("${path.module}/source/resources/demo-website/${each.value}")
+  source = "${path.module}/../source/resources/demo-website/${each.value}"
+  etag   = filemd5("${path.module}/../source/resources/demo-website/${each.value}")
 
   content_type = lookup(
     {

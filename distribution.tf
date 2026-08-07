@@ -9,7 +9,7 @@
 resource "aws_cloudfront_function" "api_path_rewriter" {
   name    = "${local.name_prefix}-${local.environment}-api-path-rewriter"
   runtime = "cloudfront-js-2.0"
-  comment = "Strip /api prefix before forwarding to APIGW."
+  comment = "Strip /api prefix before forwarding to APIGW. VID-3434 fix."
   publish = true
   code    = <<-EOT
     function handler(event) {
@@ -118,13 +118,17 @@ resource "aws_cloudfront_cache_policy" "with_country_header" {
 resource "aws_cloudfront_distribution" "this" {
   enabled         = true
   is_ipv6_enabled = true
-  comment         = "CTA-5007-B secure media distribution."
+  comment         = "CTA-5007-B secure media distribution. VID-3439."
   web_acl_id      = aws_wafv2_web_acl.this.arn
 
-  # Default behavior — demo origin, validator on viewer-request, real-time logs
+  # Default behavior — validator on viewer-request, real-time logs.
+  # Origin is the CDK reference solution's demo playback host — fine for
+  # stage smoke tests. PROD_TODO: point at the real prod content origin
+  # (MediaPackage endpoint, our CDN, whatever) via var.demo_origin_domain
+  # in the prod tfvars. See README "Prod cutover" section.
   origin {
     origin_id   = "demo-origin"
-    domain_name = "cdn.mediaplaypen.com"
+    domain_name = var.demo_origin_domain
 
     custom_origin_config {
       http_port                = 80
@@ -155,7 +159,7 @@ resource "aws_cloudfront_distribution" "this" {
   # /api/* → APIGW (with the URL-rewrite function stripping /api/ prefix)
   origin {
     origin_id   = "api-origin"
-    domain_name = "${aws_api_gateway_rest_api.this.id}.execute-api.${data.aws_region.current.region}.amazonaws.com"
+    domain_name = "${aws_api_gateway_rest_api.this.id}.execute-api.${data.aws_region.current.name}.amazonaws.com"
     origin_path = "/${aws_api_gateway_stage.prod.stage_name}"
 
     custom_origin_config {
@@ -201,9 +205,23 @@ resource "aws_cloudfront_distribution" "this" {
     cache_policy_id        = data.aws_cloudfront_cache_policy.caching_optimized.id
   }
 
+  # Cache safety for viewer-specific rejections from the CTA validator
+  # (451 DMA blackout / 410 token revoked) is enforced solely by the
+  # Cache-Control: no-store header the function returns — see
+  # source/lambda/cta_token_validator.js.tftpl. CloudFront's
+  # custom_error_response only accepts a fixed set of status codes
+  # (400, 403, 404, 405, 414, 416, 500-504); 410 and 451 both return
+  # InvalidArgument at apply time, so we can't add belt-and-suspenders
+  # at the distribution layer.
+
+  # Cloud Custodian remediates CF distributions in this org to a US-only
+  # whitelist. Codified here so TF and Custodian agree — otherwise TF sets
+  # "none" on apply and Custodian flips it back to whitelist on its next
+  # sweep, cycling the tag drift indefinitely.
   restrictions {
     geo_restriction {
-      restriction_type = "none"
+      restriction_type = "whitelist"
+      locations        = ["US"]
     }
   }
 

@@ -9,7 +9,7 @@ output "kvs_id" {
 }
 
 output "validator_function_arn" {
-  description = "CTA validator CloudFront Function ARN. Attach to your own distribution's viewer-request event to enforce CWT validation."
+  description = "CTA validator CloudFront Function ARN. Attach this to the viewer-request phase of your content distribution's cache behaviors to enable token + DMA blackout enforcement."
   value       = aws_cloudfront_function.validator.arn
 }
 
@@ -34,7 +34,7 @@ output "cloudfront_domain_name" {
 }
 
 output "demo_website_url" {
-  description = "Demo website URL (only meaningful when enableDemo)."
+  description = "Demo website URL (only meaningful when the demo bucket is populated)."
   value       = "https://${aws_cloudfront_distribution.this.domain_name}/website/index.html"
 }
 

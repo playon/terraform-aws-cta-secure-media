@@ -1,5 +1,5 @@
 # WAFv2 Web ACL — rate-limit POST /api/token per source IP.
-# mitigation for automated CWT minting scrape attempts.
+# VID-3433 mitigation for automated CWT minting scrape attempts.
 
 locals {
   rate_limit_body_key = "CTAWebAclRateLimit429"
@@ -7,7 +7,7 @@ locals {
 
 resource "aws_wafv2_web_acl" "this" {
   name        = "${local.name_prefix}-${local.environment}-token-rate-limit"
-  description = "Rate-limit POST /api/token to mitigate automated CWT minting."
+  description = "Rate-limit POST /api/token to mitigate automated CWT minting - VID-3433"
   scope       = "CLOUDFRONT"
 
   default_action {
@@ -38,7 +38,7 @@ resource "aws_wafv2_web_acl" "this" {
 
     statement {
       rate_based_statement {
-        limit              = var.token_rate_limit_per_5min
+        limit              = 300
         aggregate_key_type = "IP"
 
         scope_down_statement {
