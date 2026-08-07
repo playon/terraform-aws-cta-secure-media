@@ -175,7 +175,7 @@ resource "aws_iam_role_policy" "rotation_events_start" {
 
 resource "aws_cloudwatch_event_rule" "rotation_schedule" {
   name                = "${local.name_prefix}-${local.environment}-key-rotation"
-  description         = "Trigger CTA signing key rotation on a schedule. VID-3439."
+  description         = "Trigger CTA signing key rotation on a schedule."
   schedule_expression = var.rotation_schedule
 }
 

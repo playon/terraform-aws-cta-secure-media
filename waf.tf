@@ -7,7 +7,7 @@ locals {
 
 resource "aws_wafv2_web_acl" "this" {
   name        = "${local.name_prefix}-${local.environment}-token-rate-limit"
-  description = "Rate-limit POST /api/token to mitigate automated CWT minting - VID-3433"
+  description = "Rate-limit POST /api/token to mitigate automated CWT minting"
   scope       = "CLOUDFRONT"
 
   default_action {

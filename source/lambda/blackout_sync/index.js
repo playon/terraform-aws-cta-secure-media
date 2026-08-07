@@ -1,17 +1,17 @@
 /**
- * VID-3459 — blackout sync-writer.
+ * Blackout sync-writer.
  *
- * Every 5 min: enumerate broadcasts from unity-api within a bounded
- * scan window [now - SCAN_WINDOW_PAST_HOURS, now + SCAN_WINDOW_FUTURE_HOURS].
- * For each broadcast seen, upsert blackout:{key} if it has DMAs; delete
- * the KVS entry if DMAs were cleared. Broadcasts OUTSIDE the scan
- * window are left alone — their KVS entries persist stale-but-correct-
- * at-time-of-last-write.
+ * Every 5 min: enumerate broadcasts from the upstream service within a
+ * bounded scan window [now - SCAN_WINDOW_PAST_HOURS, now +
+ * SCAN_WINDOW_FUTURE_HOURS]. For each broadcast seen, upsert
+ * blackout:{key} if it has DMAs; delete the KVS entry if DMAs were
+ * cleared. Broadcasts OUTSIDE the scan window are left alone — their
+ * KVS entries persist stale-but-correct-at-time-of-last-write.
  *
- * Both bounds matter — start_time_gte alone (unbounded future) 504's on
- * prod-scale data because NFHS Network schedules months of games in
- * advance. Broadcasts scheduled further out roll into the window as
- * they approach start_time; no preload is needed since viewers can only
+ * Both bounds matter — start_time_gte alone (unbounded future) 504's
+ * on large catalogs where broadcasts are scheduled months in advance.
+ * Broadcasts scheduled further out roll into the window as they
+ * approach start_time; no preload is needed since viewers can only
  * hit an active stream near start_time and the sync cycles every 5 min.
  *
  * Idempotent, stateless, restart-safe. On any error before writes

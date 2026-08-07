@@ -20,7 +20,7 @@ locals {
 # --------------------------------------------------------------------------
 resource "aws_cloudfront_key_value_store" "this" {
   name    = "${local.name_prefix}-${local.environment}"
-  comment = "CTA-5007-B signing key + revocation list. VID-3439."
+  comment = "CTA-5007-B signing key + revocation list."
 }
 
 # --------------------------------------------------------------------------
@@ -38,7 +38,7 @@ resource "random_password" "signing_key" {
 
 resource "aws_secretsmanager_secret" "signing_key" {
   name        = "${local.name_prefix}/${local.environment}/signing-key"
-  description = "CTA-5007-B HMAC signing key. VID-3439."
+  description = "CTA-5007-B HMAC signing key."
 
   # Match CDK stack's removal semantics — stage can be destroyed clean.
   recovery_window_in_days = local.environment == "prod" ? 30 : 0
@@ -70,7 +70,7 @@ resource "aws_secretsmanager_secret_version" "signing_key" {
 resource "aws_cloudfront_function" "validator" {
   name    = "${local.name_prefix}-${local.environment}-validator"
   runtime = "cloudfront-js-2.0"
-  comment = "CTA-5007-B CWT validator. VID-3439."
+  comment = "CTA-5007-B CWT validator."
   publish = true
   code = templatefile("${path.module}/../source/lambda/cta_token_validator.js.tftpl", {
     dma_enforcement_mode         = var.dma_enforcement_mode

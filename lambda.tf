@@ -231,7 +231,7 @@ resource "aws_lambda_function" "kvs_cleanup" {
 
 resource "aws_cloudwatch_event_rule" "kvs_cleanup_schedule" {
   name                = "${local.name_prefix}-${local.environment}-kvs-cleanup"
-  description         = "Purge expired KVS revocation entries hourly. VID-3439."
+  description         = "Purge expired KVS revocation entries hourly."
   schedule_expression = "rate(1 hour)"
 }
 

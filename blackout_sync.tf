@@ -64,7 +64,7 @@ resource "aws_lambda_function" "blackout_sync" {
 
 resource "aws_cloudwatch_event_rule" "blackout_sync_schedule" {
   name                = "${local.name_prefix}-${local.environment}-blackout-sync"
-  description         = "Trigger CTA DMA blackout reconciliation. VID-3459."
+  description         = "Trigger CTA DMA blackout reconciliation."
   schedule_expression = "rate(5 minutes)"
 }
 

@@ -1,12 +1,13 @@
 # API Gateway REST API — token mint (Node), revoke, list-revoked.
 #
 # The CDK stack disables the auto-created AWS::ApiGateway::Account resource
-# (SCP blocks apigateway:PATCH on /account). TF's aws_api_gateway_rest_api
-# does NOT create an Account resource, so we don't need the workaround.
+# (SCP blocks apigateway:PATCH on /account in some orgs). TF's
+# aws_api_gateway_rest_api does NOT create an Account resource, so we
+# don't need the workaround.
 #
-# VID-3449: POST /token is IAM-gated when var.drm_api_lambda_role_arn is
-# set. In stage, the drm-api-lambda execution role becomes the only
-# principal allowed to mint tokens — no anonymous mint surface exists.
+# POST /token is IAM-gated when var.drm_api_lambda_role_arn is set —
+# only calls signed as that role reach the mint. Anonymous callers hit
+# 403 at APIGW. Empty preserves the reference-solution behavior.
 
 locals {
   # Present the token route with AWS_IAM auth when a caller ARN is
@@ -17,18 +18,16 @@ locals {
 
 resource "aws_api_gateway_rest_api" "this" {
   name        = "${local.name_prefix}-${local.environment}"
-  description = "CTA Token API. VID-3439."
+  description = "CTA Token API."
 
   endpoint_configuration {
     types = ["EDGE"]
   }
 
-  # VID-3484 follow-up: policy moved to aws_api_gateway_rest_api_policy.this
-  # so its Resource strings can reference this API's .id. TF disallows
-  # self-references inside a resource's own attributes, but not from a
-  # separate resource that depends on this one. The prior VID-3484 merge
-  # (#26) shipped the self-referencing inline `policy` and broke plan;
-  # this PR completes the migration to a separate policy resource.
+  # Policy is on aws_api_gateway_rest_api_policy.this (defined below)
+  # so its Resource strings can reference this API's .id. Terraform
+  # disallows self-references inside a resource's own attributes but
+  # allows them from a separate resource that depends on this one.
 }
 
 # VID-3449 (rehomed by VID-3484): resource policy restricts invoke on
@@ -170,8 +169,8 @@ resource "aws_api_gateway_deployment" "this" {
   rest_api_id = aws_api_gateway_rest_api.this.id
 
   # Triggers redeploy on any change to routes/methods/integrations.
-  # Also hash token_post.authorization so flipping VID-3449's AWS_IAM
-  # gate forces a fresh deployment out to the stage.
+  # Also hash token_post.authorization so flipping the AWS_IAM gate
+  # forces a fresh deployment out to the stage.
   #
   # Do NOT include aws_api_gateway_rest_api.this.policy here. AWS
   # normalizes the resource policy JSON on write-back (reorders keys,

@@ -1,9 +1,9 @@
 # S3 demo bucket + upload of resources/demo-website/.
 #
-# Currently unconditional — this port covers stage only (per VID-3439
-# ticket scope), and stage always wants the demo. When prod deployment
-# is scoped, add an `enable_demo` variable and gate these resources
-# with `count`; the distribution's /website/* behavior + demo-website
+# Currently unconditional — matches the CDK reference solution's
+# enableDemo=true default. If you don't want the demo files in prod,
+# add an `enable_demo` variable and gate these resources with
+# `count`; the distribution's /website/* behavior + demo-website
 # origin need matching conditionalization at that time.
 #
 # Dashboard is not included in this port (was optional in the CDK

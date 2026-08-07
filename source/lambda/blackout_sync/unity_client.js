@@ -13,8 +13,8 @@
  * Read endpoint is anonymous — no credential threaded through.
  *
  * Scan window must be bounded on both sides — the endpoint returns 400
- * on single-bound requests. NFHS Network schedules months of games in
- * advance so an unbounded side would timeout.
+ * on single-bound requests. Large catalogs that schedule broadcasts
+ * months in advance make an unbounded side timeout.
  */
 
 const DEFAULT_PAGE_SIZE = 1000;

@@ -9,7 +9,7 @@
 resource "aws_cloudfront_function" "api_path_rewriter" {
   name    = "${local.name_prefix}-${local.environment}-api-path-rewriter"
   runtime = "cloudfront-js-2.0"
-  comment = "Strip /api prefix before forwarding to APIGW. VID-3434 fix."
+  comment = "Strip /api prefix before forwarding to APIGW fix."
   publish = true
   code    = <<-EOT
     function handler(event) {
@@ -118,7 +118,7 @@ resource "aws_cloudfront_cache_policy" "with_country_header" {
 resource "aws_cloudfront_distribution" "this" {
   enabled         = true
   is_ipv6_enabled = true
-  comment         = "CTA-5007-B secure media distribution. VID-3439."
+  comment         = "CTA-5007-B secure media distribution."
   web_acl_id      = aws_wafv2_web_acl.this.arn
 
   # Default behavior — validator on viewer-request, real-time logs.

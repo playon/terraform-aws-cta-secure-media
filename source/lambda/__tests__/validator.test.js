@@ -102,14 +102,14 @@ describe('CTA validator — VID-3464 UA allowlist', () => {
 
   test('allowlisted UA bypasses token validation and forwards request', async () => {
     const { handler } = loadValidator(
-      render({ legacy_client_allowlist_json: '["^Roku/DVP-", "^NFHS Network/"]' }),
+      render({ legacy_client_allowlist_json: '["^Roku/DVP-", "^ExampleApp/"]' }),
       {}
     );
     const rokuRes = await handler(makeRequest({ userAgent: 'Roku/DVP-15.2 (15.2.4.3450-H2)' }));
     expect(rokuRes.statusCode).toBeUndefined();
     expect(rokuRes.uri).toBe('/broadcast/abc/720p30/live.m3u8');
 
-    const legacyAndroid = await handler(makeRequest({ userAgent: 'NFHS Network/1.11.7 (Linux;Android 9) AndroidXMedia3/1.7.1' }));
+    const legacyAndroid = await handler(makeRequest({ userAgent: 'ExampleApp/1.11.7 (Linux;Android 9) AndroidXMedia3/1.7.1' }));
     expect(legacyAndroid.statusCode).toBeUndefined();
   });
 
@@ -133,15 +133,15 @@ describe('CTA validator — VID-3464 UA allowlist', () => {
     expect(res.body).toBe('missing_token');
   });
 
-  test('regex escaping: pattern with . as literal (com.playon.nfhslive) does not match arbitrary chars', async () => {
+  test('regex escaping: pattern with . as literal does not match arbitrary chars', async () => {
     const { handler } = loadValidator(
-      render({ legacy_client_allowlist_json: '["^com\\\\.playon\\\\.nfhslive/"]' }),
+      render({ legacy_client_allowlist_json: '["^com\\\\.example\\\\.videoapp/"]' }),
       {}
     );
-    const good = await handler(makeRequest({ userAgent: 'com.playon.nfhslive/3.6.4' }));
+    const good = await handler(makeRequest({ userAgent: 'com.example.videoapp/3.6.4' }));
     expect(good.statusCode).toBeUndefined();
 
-    const bad = await handler(makeRequest({ userAgent: 'comXplayonXnfhslive/3.6.4' }));
+    const bad = await handler(makeRequest({ userAgent: 'comXexampleXvideoapp/3.6.4' }));
     expect(bad.statusCode).toBe(401);
   });
 });
