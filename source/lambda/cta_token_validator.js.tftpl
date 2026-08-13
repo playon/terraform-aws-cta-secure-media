@@ -87,13 +87,16 @@ async function checkDmaBlackout(request, kvs) {
     if (!blocklistCsv) return null;
     var metroHeader = request.headers["cloudfront-viewer-metro-code"];
     if (!metroHeader) {
-        // Fail-open — but log it. Consumers must attach a cache policy
-        // that forwards CloudFront-Viewer-Metro-Code to the origin (this
-        // module's default_cache_behavior uses one that whitelists
-        // CloudFront-Viewer-Country only, so it does NOT reach the
-        // validator on the /website/* + demo paths). Missing-header
-        // counts alongside blocked/passed counts is what makes log
-        // mode's zero-blocked reading trustworthy.
+        // Fail-open — but log it. CloudFront only populates viewer-*
+        // headers when they're on the attached cache policy's
+        // whitelist; without CloudFront-Viewer-Metro-Code this branch
+        // fires on every request and no viewer is ever blacked out.
+        // The module ships a cache policy that whitelists this header,
+        // but consumers attaching the validator to their own behavior
+        // with a stock policy (e.g. managed CachingOptimized) will hit
+        // this — see README "Consumer cache policy" for the required
+        // header set. Missing-header count alongside blocked/passed
+        // is what makes log mode's zero-blocked reading trustworthy.
         console.log("blackout_dma_missing_metro broadcast=" + broadcastId + " mode=" + DMA_ENFORCEMENT_MODE);
         return null;
     }

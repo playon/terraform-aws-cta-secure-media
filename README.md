@@ -15,9 +15,11 @@ Feature-parity with the upstream CDK stack, plus:
 
 ## Usage
 
+The module must be planned and applied against `us-east-1` — the WAFv2 Web ACL is `CLOUDFRONT`-scoped, which AWS only serves from us-east-1. The module doesn't accept a `region` input; point your provider there:
+
 ```hcl
 provider "aws" {
-  region = "us-east-1"  # WAFv2 CLOUDFRONT scope requires us-east-1
+  region = "us-east-1"
 }
 
 module "cta" {
@@ -61,12 +63,28 @@ resource "aws_cloudfront_distribution" "content" {
 
 See [`examples/basic/`](examples/basic/) for a full worked example.
 
+Before the first `terraform apply`, install the Lambda runtime deps:
+
+```bash
+make lambda-deps
+```
+
+This installs `source/lambda/node_modules` and `source/lambda/blackout_sync/node_modules`. `archive_file` zips each source directory as-is, so without this step the deployed Lambdas 500 on cold start with `Cannot find module ...`.
+
+## Consumer cache policy
+
+The validator reads two CloudFront-populated viewer headers:
+
+- `CloudFront-Viewer-Country` — checked against the token's `CATGEOISO3166` (claim 316) country allowlist.
+- `CloudFront-Viewer-Metro-Code` — checked against the per-broadcast DMA blocklist in KVS.
+
+**CloudFront only populates viewer-* headers when they're on the attached cache policy's whitelist.** The cache policy this module ships (`aws_cloudfront_cache_policy.validator_headers`) whitelists both, but when you attach `validator_function_arn` to your own distribution's cache behavior, that behavior's cache policy also needs to forward them — the managed `CachingOptimized` / `CachingDisabled` policies forward *no* headers and will silently break both gates. Missing `Country` returns `401 geo_restricted` on every token carrying a 316 claim; missing `Metro-Code` fail-opens the DMA gate (auditable via the `blackout_dma_missing_metro` CloudWatch log line).
+
 ## Inputs
 
 | Name | Description | Type | Default |
 |---|---|---|---|
 | `environment` | Deployment environment slug (e.g., `staging`, `prod`). Used in resource names and the APIGW `stage_name`. | `string` | *(required)* |
-| `region` | AWS region. WAFv2 CLOUDFRONT-scoped resources always live in `us-east-1` regardless of this value. | `string` | `"us-east-1"` |
 | `account_id` | Optional guard: assert caller identity matches. Empty skips the check. | `string` | `""` |
 | `name_prefix` | Prefix for named resources. | `string` | `"cta-secure-media"` |
 | `signing_key_length` | HMAC signing key length in bytes. | `number` | `64` |
@@ -121,6 +139,12 @@ And return an array of `{ key: string, dma_list: number[] | null }` objects. Ada
 - 1× API Gateway REST API with 3 resources (token, revoke, revoked)
 - 1× WAFv2 Web ACL (rate limit on `POST /api/token`)
 - 1× S3 demo bucket + demo website files
+
+## Migration notes
+
+- **`CATGEOISO3166` (claim 316) is enforced whenever a token carries it.** There is no toggle to opt out — the check runs inside `validateClaims` for any token whose payload includes the claim. If you were previously running with `geo_validation_enabled = false` and minters were still emitting the claim, viewers whose `CloudFront-Viewer-Country` isn't in the token's country list will now get `401 geo_restricted`. Either stop emitting claim 316 at mint time, or verify your minters produce the correct country set.
+- The `blackout_sync` stack (Lambda, IAM, 5-min EventBridge schedule) is only created when `dma_enforcement_mode` is `log` or `enforce`. When on, `blackout_api_base_url` is required.
+- Run `make lambda-deps` before the first `terraform apply` — the Lambda zips depend on it.
 
 ## Relationship to upstream
 

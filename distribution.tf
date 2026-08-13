@@ -86,7 +86,15 @@ resource "aws_cloudfront_realtime_log_config" "this" {
 
 # --- Custom cache policy for default behavior (allowlist Country header) --
 
-resource "aws_cloudfront_cache_policy" "with_country_header" {
+# Cache policy for the default (content) behavior. The validator needs
+# BOTH CloudFront-Viewer-Country (per-token CATGEOISO3166 country
+# check) and CloudFront-Viewer-Metro-Code (per-broadcast DMA blackout
+# check) — CloudFront only populates viewer-* headers when they're on
+# the cache policy's whitelist. If a header isn't forwarded, its gate
+# silently fails: country-missing rejects every geo-scoped token with
+# 401 geo_restricted, and metro-missing takes the DMA gate's fail-open
+# branch and logs a `blackout_dma_missing_metro` line.
+resource "aws_cloudfront_cache_policy" "validator_headers" {
   name        = "${local.name_prefix}-${local.environment}-cache-policy"
   min_ttl     = 0
   default_ttl = 86400
@@ -107,7 +115,10 @@ resource "aws_cloudfront_cache_policy" "with_country_header" {
     headers_config {
       header_behavior = "whitelist"
       headers {
-        items = ["CloudFront-Viewer-Country"]
+        items = [
+          "CloudFront-Viewer-Country",
+          "CloudFront-Viewer-Metro-Code",
+        ]
       }
     }
   }
@@ -146,7 +157,7 @@ resource "aws_cloudfront_distribution" "this" {
     allowed_methods          = ["GET", "HEAD"]
     cached_methods           = ["GET", "HEAD"]
     compress                 = true
-    cache_policy_id          = aws_cloudfront_cache_policy.with_country_header.id
+    cache_policy_id          = aws_cloudfront_cache_policy.validator_headers.id
     origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id
     realtime_log_config_arn  = aws_cloudfront_realtime_log_config.this.arn
 

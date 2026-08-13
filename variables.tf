@@ -5,13 +5,6 @@ variable "account_id" {
   nullable    = false
 }
 
-variable "region" {
-  type        = string
-  description = "AWS region for module resources. WAFv2 CLOUDFRONT-scoped resources always live in us-east-1 regardless of this value, so if you set a non-us-east-1 region here you also need `provider \"aws\" { alias = \"us_east_1\" }` in the calling config — the WAF resource explicitly uses us-east-1."
-  default     = "us-east-1"
-  nullable    = false
-}
-
 variable "environment" {
   type        = string
   description = "Deployment environment slug (e.g., staging, prod). Used in resource names and the APIGW stage_name."

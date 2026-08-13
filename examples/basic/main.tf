@@ -31,6 +31,13 @@ module "cta" {
   # gate is on.
   # dma_enforcement_mode = "off"
 
+  # This is a dev example — set both destroy-safety knobs so
+  # `terraform destroy` + `terraform apply` cleanly round-trips. Flip
+  # both in a real deployment (keep the 30-day secret recovery window,
+  # keep the demo bucket protected from accidental destroy).
+  secret_recovery_window_days = 0
+  demo_bucket_force_destroy   = true
+
   # account_id = "123456789012"  # optional caller-identity guard
 }
 

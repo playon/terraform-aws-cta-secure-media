@@ -35,11 +35,17 @@ function render(overrides) {
 // Load the rendered validator into a fresh vm context and return its
 // handler. The `cf` import is replaced with a stub because CloudFront
 // Functions ESM syntax isn't available in Node's CommonJS jest runner.
+//
+// The kvs stub records every get() call — asserting `kvsGets.length`
+// is how tests pin "no lookup happened," rather than relying on a
+// throwing accessor that checkDmaBlackout's try/catch would swallow.
 function loadValidator(rendered, kvsMap, opts) {
   const validateToken = (opts && opts.validateToken) || (() => { throw new Error('cwt_stub_called'); });
   const logs = [];
+  const kvsGets = [];
   const kvs = {
     get: async (key) => {
+      kvsGets.push(key);
       if (!(key in kvsMap)) throw new Error('KeyNotFound');
       return kvsMap[key];
     },
@@ -72,7 +78,7 @@ function loadValidator(rendered, kvsMap, opts) {
     clearTimeout,
   });
   vm.runInContext(wrapped, context);
-  return { handler: module.exports.handler, logs };
+  return { handler: module.exports.handler, logs, kvsGets };
 }
 
 function makeRequest({ uri = '/broadcast/abc/720p30/live.m3u8', userAgent = 'Mozilla/5.0', method = 'GET', pathToken, metroCode, country } = {}) {
@@ -267,17 +273,16 @@ describe('CTA validator — DMA blackout gate', () => {
   });
 
   test('off mode → check skipped entirely, no KVS lookup', async () => {
-    // KVS stub that would throw if hit — proves we skipped the read.
-    const kvsMap = {};
-    Object.defineProperty(kvsMap, 'blackout:abc', {
-      get() { throw new Error('KVS should not be consulted when dma is off'); },
-    });
-    const { handler } = loadValidator(
+    // Pin "no lookup happened" by asserting the get counter is zero.
+    // A throwing getter here would be swallowed by checkDmaBlackout's
+    // try/catch and the test would pass even if the lookup fired.
+    const { handler, kvsGets } = loadValidator(
       render({ dma_enforcement_mode: 'off', token_enforcement_mode: 'off' }),
-      kvsMap
+      { 'blackout:abc': '602' }
     );
     const res = await handler(makeRequest({ uri: '/broadcast/abc/720p30/live.m3u8', metroCode: 602 }));
     expect(res.statusCode).toBeUndefined();
+    expect(kvsGets).toEqual([]);
   });
 
   test('missing metro-code header emits a log line and fails open', async () => {
