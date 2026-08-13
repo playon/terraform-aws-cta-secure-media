@@ -18,9 +18,20 @@ provider "aws" {
 module "cta" {
   source = "../.."
 
-  environment           = "dev"
-  blackout_api_base_url = "https://example.invalid/api" # required — point at your DMA blocklist upstream
-  # account_id          = "123456789012"                # optional guard
+  environment = "dev"
+
+  # A fresh deploy has no minted tokens; leave the gate at "off" until
+  # your minter is wired up, flip to "log" to observe the reject
+  # population, then to "enforce" once that signal is clean.
+  token_enforcement_mode = "off"
+
+  # DMA gate defaults to "off"; when you turn it on ("log" / "enforce"),
+  # set `blackout_api_base_url = "https://your-upstream.example.com"`
+  # and re-apply — the blackout_sync Lambda is only created when the
+  # gate is on.
+  # dma_enforcement_mode = "off"
+
+  # account_id = "123456789012"  # optional caller-identity guard
 }
 
 output "validator_function_arn" {

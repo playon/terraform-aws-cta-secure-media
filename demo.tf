@@ -11,11 +11,7 @@
 
 resource "aws_s3_bucket" "demo" {
   bucket_prefix = "${local.name_prefix}-${local.environment}-demo-"
-  # Non-prod environments get force_destroy = true so `terraform destroy`
-  # wipes the bucket cleanly during tear-down. Prod flips to false so an
-  # accidental destroy fails loudly rather than silently taking demo
-  # objects with it.
-  force_destroy = local.environment == "prod" ? false : true
+  force_destroy = var.demo_bucket_force_destroy
 }
 
 resource "aws_s3_bucket_public_access_block" "demo" {

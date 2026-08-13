@@ -7,7 +7,7 @@ variable "account_id" {
 
 variable "region" {
   type        = string
-  description = "AWS region for all resources."
+  description = "AWS region for module resources. WAFv2 CLOUDFRONT-scoped resources always live in us-east-1 regardless of this value, so if you set a non-us-east-1 region here you also need `provider \"aws\" { alias = \"us_east_1\" }` in the calling config — the WAF resource explicitly uses us-east-1."
   default     = "us-east-1"
   nullable    = false
 }
@@ -30,6 +30,37 @@ variable "signing_key_length" {
   description = "HMAC signing key length. 64 matches the CDK reference solution."
   default     = 64
   nullable    = false
+}
+
+variable "secret_recovery_window_days" {
+  type        = number
+  description = "AWS Secrets Manager recovery window (in days) for the signing-key secret. 0 = immediate destroy (fine for ephemeral non-prod envs); 7-30 keeps the secret recoverable for that many days after a `terraform destroy`. Default `30` is the safe production choice — flip to `0` in throwaway environments so `terraform destroy` doesn't leave orphan secrets that block re-apply for a month."
+  default     = 30
+  nullable    = false
+
+  validation {
+    condition     = var.secret_recovery_window_days == 0 || (var.secret_recovery_window_days >= 7 && var.secret_recovery_window_days <= 30)
+    error_message = "secret_recovery_window_days must be 0, or between 7 and 30 (inclusive)."
+  }
+}
+
+variable "demo_bucket_force_destroy" {
+  type        = bool
+  description = "When true, `terraform destroy` empties + removes the demo S3 bucket even if it still holds objects. Convenient for throwaway envs. Set false in prod so an accidental destroy fails loudly rather than silently taking demo objects with it."
+  default     = false
+  nullable    = false
+}
+
+variable "token_rate_limit_per_5min" {
+  type        = number
+  description = "WAFv2 rate-based limit (per source IP, 5-minute sliding window) for POST /api/token. The 'well above legitimate traffic' threshold depends entirely on the consumer's token cadence — a viewer who mints once per session sits at ~1/hr, but a burst-y refresh pattern can hit dozens per session. Default 300 matches PlayOn's minter cadence; tune per consumer."
+  default     = 300
+  nullable    = false
+
+  validation {
+    condition     = var.token_rate_limit_per_5min >= 100 && var.token_rate_limit_per_5min <= 20000000
+    error_message = "token_rate_limit_per_5min must be within AWS WAF rate-based limits (100 - 20,000,000)."
+  }
 }
 
 variable "rotation_schedule" {
@@ -79,7 +110,8 @@ variable "broadcast_uri_prefix" {
 
 variable "blackout_api_base_url" {
   type        = string
-  description = "Base URL of the upstream service the blackout sync-writer reads per-broadcast DMA blocklists from. The Lambda hits `<base>/v2/broadcasts/dmas`. Anonymous read endpoint by default; if your upstream needs auth, extend `source/lambda/blackout_sync/blackout_client.js`."
+  description = "Base URL of the upstream service the blackout sync-writer reads per-broadcast DMA blocklists from. The Lambda hits `<base>/v2/broadcasts/dmas`. Anonymous read endpoint by default; if your upstream needs auth, extend `source/lambda/blackout_sync/blackout_client.js`. Required when `dma_enforcement_mode` is `log` or `enforce`; ignored (and the blackout_sync resources are not created) when `off`."
+  default     = ""
   nullable    = false
 }
 

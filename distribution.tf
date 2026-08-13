@@ -9,7 +9,7 @@
 resource "aws_cloudfront_function" "api_path_rewriter" {
   name    = "${local.name_prefix}-${local.environment}-api-path-rewriter"
   runtime = "cloudfront-js-2.0"
-  comment = "Strip /api prefix before forwarding to APIGW fix."
+  comment = "Strip /api prefix before forwarding to APIGW."
   publish = true
   code    = <<-EOT
     function handler(event) {

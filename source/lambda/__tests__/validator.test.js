@@ -1,4 +1,4 @@
-// VID-3464: tests for the CTA validator CloudFront Function.
+// Tests for the CTA validator CloudFront Function.
 //
 // The validator ships as a Terraform .js.tftpl template that's rendered
 // at `terraform apply` time and uploaded as a CloudFront Function. To
@@ -7,9 +7,8 @@
 // JS in a `vm` context so top-level state (compiled RegExp array, etc.)
 // initializes per test.
 //
-// Only VID-3464-scoped behavior is covered — legacy-client allowlist,
-// token_enforcement_mode dispatch. Full token/DMA coverage is left to
-// staging smoke.
+// Coverage: legacy-client UA allowlist, token_enforcement_mode dispatch,
+// DMA blackout gate, and the CATGEOISO3166 (claim 316) country check.
 
 const fs = require('fs');
 const path = require('path');
@@ -22,7 +21,7 @@ function render(overrides) {
     token_enforcement_mode: 'enforce',
     dma_enforcement_mode: 'off',
     legacy_client_allowlist_json: '[]',
-    broadcast_uri_prefix: '/broadcast/',
+    broadcast_uri_prefix_json: JSON.stringify('/broadcast/'),
   };
   const values = Object.assign({}, defaults, overrides || {});
   let src = fs.readFileSync(TEMPLATE_PATH, 'utf8');
@@ -76,10 +75,16 @@ function loadValidator(rendered, kvsMap, opts) {
   return { handler: module.exports.handler, logs };
 }
 
-function makeRequest({ uri = '/broadcast/abc/720p30/live.m3u8', userAgent = 'Mozilla/5.0', method = 'GET', pathToken } = {}) {
+function makeRequest({ uri = '/broadcast/abc/720p30/live.m3u8', userAgent = 'Mozilla/5.0', method = 'GET', pathToken, metroCode, country } = {}) {
   const headers = {};
   if (userAgent !== null) {
     headers['user-agent'] = { value: userAgent };
+  }
+  if (metroCode !== undefined) {
+    headers['cloudfront-viewer-metro-code'] = { value: String(metroCode) };
+  }
+  if (country !== undefined) {
+    headers['cloudfront-viewer-country'] = { value: country };
   }
   const finalUri = pathToken ? `/${pathToken}${uri}` : uri;
   return {
@@ -93,7 +98,7 @@ function makeRequest({ uri = '/broadcast/abc/720p30/live.m3u8', userAgent = 'Moz
   };
 }
 
-describe('CTA validator — VID-3464 UA allowlist', () => {
+describe('CTA validator — UA allowlist', () => {
   test('empty allowlist forwards through to token validation (missing_token → 401 in enforce)', async () => {
     const { handler } = loadValidator(render({}), { 'key:default': 'test-signing-key' });
     const res = await handler(makeRequest());
@@ -147,7 +152,7 @@ describe('CTA validator — VID-3464 UA allowlist', () => {
   });
 });
 
-describe('CTA validator — VID-3464 token_enforcement_mode', () => {
+describe('CTA validator — token_enforcement_mode', () => {
   test('mode=log forwards request even when token is missing', async () => {
     const { handler } = loadValidator(render({ token_enforcement_mode: 'log' }), {});
     const res = await handler(makeRequest());
@@ -211,4 +216,188 @@ describe('CTA validator — VID-3464 token_enforcement_mode', () => {
     expect(res.headers['cache-control'].value).toBe('no-store, max-age=0');
   });
 
+  test('rejects include access-control-allow-origin: * so browser JS can read them', async () => {
+    const { handler } = loadValidator(render({}), { 'key:default': 'test-signing-key' });
+    const res = await handler(makeRequest());
+    expect(res.statusCode).toBe(401);
+    expect(res.headers['access-control-allow-origin'].value).toBe('*');
+  });
+
+});
+
+describe('CTA validator — DMA blackout gate', () => {
+  test('enforce + matching metro → 451 blackout_dma', async () => {
+    const { handler } = loadValidator(
+      render({ dma_enforcement_mode: 'enforce', token_enforcement_mode: 'off' }),
+      { 'blackout:abc': '602,524' }
+    );
+    const res = await handler(makeRequest({ uri: '/broadcast/abc/720p30/live.m3u8', metroCode: 602 }));
+    expect(res.statusCode).toBe(451);
+    expect(res.body).toBe('blackout_dma');
+    expect(res.headers['cache-control'].value).toBe('no-store, max-age=0');
+    expect(res.headers['access-control-allow-origin'].value).toBe('*');
+  });
+
+  test('enforce + non-matching metro → forwards', async () => {
+    const { handler } = loadValidator(
+      render({ dma_enforcement_mode: 'enforce', token_enforcement_mode: 'off' }),
+      { 'blackout:abc': '602,524' }
+    );
+    const res = await handler(makeRequest({ uri: '/broadcast/abc/720p30/live.m3u8', metroCode: 501 }));
+    expect(res.statusCode).toBeUndefined();
+  });
+
+  test('enforce + no KVS entry for broadcast → forwards (no blocklist = no block)', async () => {
+    const { handler } = loadValidator(
+      render({ dma_enforcement_mode: 'enforce', token_enforcement_mode: 'off' }),
+      {}
+    );
+    const res = await handler(makeRequest({ uri: '/broadcast/never-seen/720p30/live.m3u8', metroCode: 602 }));
+    expect(res.statusCode).toBeUndefined();
+  });
+
+  test('log mode + matching metro → forwards, emits log line', async () => {
+    const { handler, logs } = loadValidator(
+      render({ dma_enforcement_mode: 'log', token_enforcement_mode: 'off' }),
+      { 'blackout:abc': '602' }
+    );
+    const res = await handler(makeRequest({ uri: '/broadcast/abc/720p30/live.m3u8', metroCode: 602 }));
+    expect(res.statusCode).toBeUndefined();
+    expect(logs.some(l => l.includes('blackout_dma broadcast=abc') && l.includes('metro=602'))).toBe(true);
+  });
+
+  test('off mode → check skipped entirely, no KVS lookup', async () => {
+    // KVS stub that would throw if hit — proves we skipped the read.
+    const kvsMap = {};
+    Object.defineProperty(kvsMap, 'blackout:abc', {
+      get() { throw new Error('KVS should not be consulted when dma is off'); },
+    });
+    const { handler } = loadValidator(
+      render({ dma_enforcement_mode: 'off', token_enforcement_mode: 'off' }),
+      kvsMap
+    );
+    const res = await handler(makeRequest({ uri: '/broadcast/abc/720p30/live.m3u8', metroCode: 602 }));
+    expect(res.statusCode).toBeUndefined();
+  });
+
+  test('missing metro-code header emits a log line and fails open', async () => {
+    // Consumers must attach a cache policy that forwards the metro
+    // header; without one, "safe" 0-blocked readings in log mode are
+    // meaningless. The log line makes the miss auditable.
+    const { handler, logs } = loadValidator(
+      render({ dma_enforcement_mode: 'log', token_enforcement_mode: 'off' }),
+      { 'blackout:abc': '602' }
+    );
+    const res = await handler(makeRequest({ uri: '/broadcast/abc/720p30/live.m3u8' })); // no metroCode
+    expect(res.statusCode).toBeUndefined();
+    expect(logs.some(l => l.includes('blackout_dma_missing_metro'))).toBe(true);
+  });
+
+  test('DMA runs before token bypass — off token + enforce DMA still blocks', async () => {
+    const { handler } = loadValidator(
+      render({ dma_enforcement_mode: 'enforce', token_enforcement_mode: 'off' }),
+      { 'blackout:abc': '602' }
+    );
+    const res = await handler(makeRequest({ uri: '/broadcast/abc/720p30/live.m3u8', metroCode: 602 }));
+    expect(res.statusCode).toBe(451);
+  });
+
+  test('custom broadcast_uri_prefix routes DMA lookup at the right key', async () => {
+    const { handler } = loadValidator(
+      render({
+        dma_enforcement_mode: 'enforce',
+        token_enforcement_mode: 'off',
+        broadcast_uri_prefix_json: JSON.stringify('/live/'),
+      }),
+      { 'blackout:xyz': '602' }
+    );
+    const res = await handler(makeRequest({ uri: '/live/xyz/720p30/live.m3u8', metroCode: 602 }));
+    expect(res.statusCode).toBe(451);
+  });
+});
+
+describe('CTA validator — CATGEOISO3166 (claim 316)', () => {
+  function encodeToken(payload) {
+    // Stub token: pass the payload straight to validateToken via a
+    // custom stub. The token string itself is opaque — we care about
+    // what payload validateClaims sees.
+    return 'stub-token-value';
+  }
+
+  test('token with country claim + matching country → forwards', async () => {
+    const { handler } = loadValidator(
+      render({ token_enforcement_mode: 'enforce' }),
+      { 'key:default': 'signing-key' },
+      { validateToken: () => ({ payload: { 316: ['us', 'ca'] } }) }
+    );
+    const req = makeRequest({
+      pathToken: 'x'.repeat(60),
+      uri: '/broadcast/abc/720p30/live.m3u8',
+      country: 'US',
+    });
+    const res = await handler(req);
+    expect(res.statusCode).toBeUndefined();
+  });
+
+  test('token with country claim + non-matching country → 401 geo_restricted', async () => {
+    const { handler } = loadValidator(
+      render({ token_enforcement_mode: 'enforce' }),
+      { 'key:default': 'signing-key' },
+      { validateToken: () => ({ payload: { 316: ['us'] } }) }
+    );
+    const req = makeRequest({
+      pathToken: 'x'.repeat(60),
+      uri: '/broadcast/abc/720p30/live.m3u8',
+      country: 'CA',
+    });
+    const res = await handler(req);
+    expect(res.statusCode).toBe(401);
+    expect(res.body).toBe('geo_restricted');
+  });
+
+  test('token with country claim + missing viewer country header → 401 geo_restricted', async () => {
+    const { handler } = loadValidator(
+      render({ token_enforcement_mode: 'enforce' }),
+      { 'key:default': 'signing-key' },
+      { validateToken: () => ({ payload: { 316: ['us'] } }) }
+    );
+    const req = makeRequest({
+      pathToken: 'x'.repeat(60),
+      uri: '/broadcast/abc/720p30/live.m3u8',
+    });
+    // No cloudfront-viewer-country header set.
+    const res = await handler(req);
+    expect(res.statusCode).toBe(401);
+    expect(res.body).toBe('geo_restricted');
+  });
+
+  test('token without country claim → country header ignored', async () => {
+    const { handler } = loadValidator(
+      render({ token_enforcement_mode: 'enforce' }),
+      { 'key:default': 'signing-key' },
+      { validateToken: () => ({ payload: {} }) }
+    );
+    const req = makeRequest({
+      pathToken: 'x'.repeat(60),
+      uri: '/broadcast/abc/720p30/live.m3u8',
+      country: 'CN',
+    });
+    const res = await handler(req);
+    expect(res.statusCode).toBeUndefined();
+  });
+
+  test('country claim is case-insensitive (header uppercase, claim lowercase)', async () => {
+    const { handler } = loadValidator(
+      render({ token_enforcement_mode: 'enforce' }),
+      { 'key:default': 'signing-key' },
+      { validateToken: () => ({ payload: { 316: ['US'] } }) } // uppercase in claim
+    );
+    const req = makeRequest({
+      pathToken: 'x'.repeat(60),
+      uri: '/broadcast/abc/720p30/live.m3u8',
+      country: 'us', // lowercase in header (defensively normalized)
+    });
+    const res = await handler(req);
+    expect(res.statusCode).toBeUndefined();
+  });
 });

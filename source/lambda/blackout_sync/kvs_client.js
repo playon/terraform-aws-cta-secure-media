@@ -12,11 +12,16 @@
  * Deletion scope: only broadcasts SEEN in the current scan window can
  * have their KVS entries deleted. Broadcasts outside the window
  * (aged-out historical archives) are left untouched — their entries
- * persist. This matches the "future VODs only" scoping decision on
- * VID-3459.
+ * persist. This is the "future VODs only" scoping decision that
+ * prevents scan-window shrinkage from silently unblacking archived
+ * content.
  */
 
-require("@aws-sdk/signature-v4-crt");
+// CloudFront KVS Update* calls are SigV4A-signed under the hood; the
+// pure-JS signer registers itself on require and matches the runtime
+// (Lambda Linux) without the native cross-compile that @aws-sdk/
+// signature-v4-crt would need.
+require("@aws-sdk/signature-v4a");
 
 const {
     CloudFrontKeyValueStoreClient,
@@ -36,37 +41,44 @@ async function getEtag(kvsArn) {
 }
 
 async function listBlackoutKeys(kvsArn) {
-    const keys = new Set();
+    const entries = new Map();
     let nextToken;
     do {
         const resp = await client.send(new ListKeysCommand({ KvsARN: kvsArn, NextToken: nextToken }));
         for (const item of resp.Items || []) {
             if (item.Key && item.Key.startsWith(KEY_PREFIX)) {
-                keys.add(item.Key);
+                entries.set(item.Key, item.Value);
             }
         }
         nextToken = resp.NextToken;
     } while (nextToken);
-    return keys;
+    return entries;
 }
 
 /**
  * Compute puts + deletes given:
- *   existingKeys — full "blackout:*" set currently in KVS
- *   desired      — Map<broadcastKey, dmaListCsv> — broadcasts in window WITH DMAs
- *   inScan       — Set<broadcastKey> — every broadcast seen in the current scan window
+ *   existingEntries — Map<fullKey, currentValue> for "blackout:*" in KVS
+ *   desired         — Map<broadcastKey, dmaListCsv> — broadcasts in window WITH DMAs
+ *   inScan          — Set<broadcastKey> — every broadcast seen in the current scan window
  *
  * Deletion rule: only delete existing KVS entries whose broadcast is
  * IN the scan window (inScan) but NOT in desired (i.e. DMAs cleared
  * since last write). Entries outside the scan window are preserved.
+ *
+ * Unchanged rule: skip puts whose stored Value already equals the
+ * desired CSV. UpdateKeys is a cheap upsert, but at scale a steady-state
+ * cycle producing zero writes beats re-PUTting every in-window broadcast
+ * every 5 minutes.
  */
-function diff(existingKeys, desired, inScan) {
+function diff(existingEntries, desired, inScan) {
     const puts = [];
     const deletes = [];
     for (const [broadcastKey, value] of desired) {
-        puts.push({ Key: KEY_PREFIX + broadcastKey, Value: value });
+        const fullKey = KEY_PREFIX + broadcastKey;
+        if (existingEntries.get(fullKey) === value) continue;
+        puts.push({ Key: fullKey, Value: value });
     }
-    for (const existing of existingKeys) {
+    for (const existing of existingEntries.keys()) {
         if (!existing.startsWith(KEY_PREFIX)) continue;
         const broadcastKey = existing.slice(KEY_PREFIX.length);
         if (inScan.has(broadcastKey) && !desired.has(broadcastKey)) {
@@ -85,11 +97,11 @@ function chunk(arr, size) {
 }
 
 async function reconcile(kvsArn, desired, inScan) {
-    const existingKeys = await listBlackoutKeys(kvsArn);
-    const { puts, deletes } = diff(existingKeys, desired, inScan);
+    const existingEntries = await listBlackoutKeys(kvsArn);
+    const { puts, deletes } = diff(existingEntries, desired, inScan);
 
     if (puts.length === 0 && deletes.length === 0) {
-        return { puts: 0, deletes: 0, batches: 0, existing: existingKeys.size };
+        return { puts: 0, deletes: 0, batches: 0, existing: existingEntries.size };
     }
 
     // AWS caps UpdateKeys at 50 ops per call — batch puts + deletes together.
@@ -109,7 +121,7 @@ async function reconcile(kvsArn, desired, inScan) {
         }));
     }
 
-    return { puts: puts.length, deletes: deletes.length, batches: batches.length, existing: existingKeys.size };
+    return { puts: puts.length, deletes: deletes.length, batches: batches.length, existing: existingEntries.size };
 }
 
 module.exports = { reconcile, listBlackoutKeys, diff, KEY_PREFIX };

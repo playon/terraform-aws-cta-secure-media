@@ -2,16 +2,16 @@
 # The rotation Lambda (SyncKeysToKvs) lives in rotation.tf next to its
 # Step Functions + EventBridge setup.
 #
-# Note on packaging: archive_file zips the source directory as-is. The
-# Node lambda's package.json declares cbor-x + @aws-sdk/* which must be
-# installed BEFORE `terraform apply`. Run `make lambda-deps` at the
-# repo root, or `npm install --omit=dev --prefix source/lambda`
-# manually.
+# Note on packaging: archive_file zips each source directory as-is. The
+# Node minter's package.json declares cbor-x + @aws-sdk/*, and the
+# blackout_sync package has its own nested node_modules. Both must be
+# installed BEFORE `terraform apply` — `make lambda-deps` at the repo
+# root runs both installs.
 #
-# VID-3449 removed the /token-python and /token-ruby demo endpoints
-# (SDK samples in the reference solution — no real callers). The Python
-# and Ruby SDK source stays under source/ as documentation for external
-# integrators; only the Lambda + APIGW wiring was dropped.
+# The Python and Ruby SDK samples from the upstream reference solution
+# (and their /token-python and /token-ruby endpoints) were removed here
+# — the source directories and APIGW resources are both gone. Only the
+# Node minter ships.
 
 # --- Zip source directory ---------------------------------------------
 

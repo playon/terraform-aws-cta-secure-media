@@ -1,15 +1,17 @@
-// CTA-5007-B validator. See docs/plans/vid-3457-ua-allowlist.md and
-// AGENTS.md for design context. Feature flags baked at deploy via
-// Terraform templatefile: token_enforcement_mode (off|log|enforce),
-// dma_enforcement_mode (off|log|enforce), legacy_client_allowlist_json.
+// CTA-5007-B validator. Feature flags baked at deploy via Terraform
+// templatefile: token_enforcement_mode (off|log|enforce),
+// dma_enforcement_mode (off|log|enforce), legacy_client_allowlist_json,
+// broadcast_uri_prefix. See README "Enforcement modes" for the intended
+// rollout sequence.
 
 import cf from 'cloudfront';
 
 var TOKEN_ENFORCEMENT_MODE = "${token_enforcement_mode}";
 var DMA_ENFORCEMENT_MODE = "${dma_enforcement_mode}";
-var BROADCAST_URI_PREFIX = "${broadcast_uri_prefix}";
+var BROADCAST_URI_PREFIX = ${broadcast_uri_prefix_json};
 
-// VID-3464: pre-compile UA allowlist at init.
+// Pre-compile UA allowlist at init — new RegExp() on every viewer
+// request would be a real cost at CloudFront-Function rates.
 var LEGACY_CLIENT_ALLOWLIST_PATTERNS = (function () {
     var raw = ${legacy_client_allowlist_json};
     var out = [];
@@ -17,21 +19,33 @@ var LEGACY_CLIENT_ALLOWLIST_PATTERNS = (function () {
     return out;
 })();
 
-var CTA = { EXP: "4", NBF: "5", CTI: "7", CATNIP: "402", CATU: "401" };
+var CTA = { EXP: "4", NBF: "5", CTI: "7", CATGEOISO3166: "316", CATNIP: "402", CATU: "401" };
 var Catu = { PATH: "2" };
 var CatuMatch = { PREFIX: "1" };
 
 // Cache-Control: no-store on every rejection so CF doesn't serve one
 // viewer's per-request decision to another.
+//
+// Access-Control-Allow-Origin: * so cross-origin JS can read the 401/410/451
+// status + body. Without this header the browser blocks JS from seeing the
+// response at all (fetch() rejects opaquely, XHR gets no readable body), so
+// a client-side HEAD-then-branch-on-451 check silently fails and falls back
+// to a less-reliable path. The origin's 200 responses already set CORS
+// upstream; validator-generated rejects have to mirror that. `*` matches
+// the OPTIONS preflight handler below and is safe here because the endpoint
+// is anonymous (no credentials).
 function respond(statusCode, body) {
     return {
         statusCode: statusCode,
         body: body,
-        headers: { 'cache-control': { value: 'no-store, max-age=0' } }
+        headers: {
+            'cache-control': { value: 'no-store, max-age=0' },
+            'access-control-allow-origin': { value: '*' }
+        }
     };
 }
 
-// VID-3464: enforce → reject; log → log+forward; off handled upstream.
+// Enforce → reject; log → log+forward; off handled upstream in handler().
 function tokenReject(request, statusCode, reason) {
     console.log("token_reject reason=" + reason + " mode=" + TOKEN_ENFORCEMENT_MODE);
     if (TOKEN_ENFORCEMENT_MODE === "enforce") return respond(statusCode, reason);
@@ -72,14 +86,24 @@ async function checkDmaBlackout(request, kvs) {
     try { blocklistCsv = await kvs.get("blackout:" + broadcastId); } catch (e) { return null; }
     if (!blocklistCsv) return null;
     var metroHeader = request.headers["cloudfront-viewer-metro-code"];
-    if (!metroHeader) return null;
+    if (!metroHeader) {
+        // Fail-open — but log it. Consumers must attach a cache policy
+        // that forwards CloudFront-Viewer-Metro-Code to the origin (this
+        // module's default_cache_behavior uses one that whitelists
+        // CloudFront-Viewer-Country only, so it does NOT reach the
+        // validator on the /website/* + demo paths). Missing-header
+        // counts alongside blocked/passed counts is what makes log
+        // mode's zero-blocked reading trustworthy.
+        console.log("blackout_dma_missing_metro broadcast=" + broadcastId + " mode=" + DMA_ENFORCEMENT_MODE);
+        return null;
+    }
     if (!isMetroBlocked(metroHeader.value, blocklistCsv)) return null;
     console.log("blackout_dma broadcast=" + broadcastId + " metro=" + metroHeader.value + " mode=" + DMA_ENFORCEMENT_MODE);
     if (DMA_ENFORCEMENT_MODE === "enforce") return respond(451, "blackout_dma");
     return null;
 }
 
-// VID-3464: transitional UA allowlist. Linear scan; keep list < 20.
+// Transitional UA allowlist. Linear scan; keep the list < 20.
 function matchesLegacyAllowlist(request) {
     if (LEGACY_CLIENT_ALLOWLIST_PATTERNS.length === 0) return null;
     var uaHeader = request.headers["user-agent"];
@@ -97,6 +121,25 @@ function validateClaims(payload, request, viewerIp) {
     if (payload[CTA.NBF] && now < payload[CTA.NBF]) throw new Error("not_yet_valid");
     if (payload[CTA.CATU] && payload[CTA.CATU][Catu.PATH] && payload[CTA.CATU][Catu.PATH][CatuMatch.PREFIX]) {
         if (!request.uri.startsWith(payload[CTA.CATU][Catu.PATH][CatuMatch.PREFIX])) throw new Error("uri_not_allowed");
+    }
+    // Distribution-level geo restriction is a coarser control (whole
+    // country blocked regardless of token); the CATGEOISO3166 claim is
+    // per-token and pairs with a mint-side policy that restricts a given
+    // token to a country set. Countries in the claim are stored
+    // lowercase to match the CloudFront-Viewer-Country header casing
+    // returned by CloudFront ("US" arrives as "US"; normalize both to
+    // lowercase to compare).
+    if (payload[CTA.CATGEOISO3166]) {
+        var countryHeader = request.headers["cloudfront-viewer-country"];
+        var country = countryHeader && countryHeader.value ? countryHeader.value.toLowerCase() : null;
+        var allowedCountries = payload[CTA.CATGEOISO3166];
+        var countryMatch = false;
+        if (country) {
+            for (var c = 0; c < allowedCountries.length; c++) {
+                if (String(allowedCountries[c]).toLowerCase() === country) { countryMatch = true; break; }
+            }
+        }
+        if (!countryMatch) throw new Error("geo_restricted");
     }
     if (payload[CTA.CATNIP] && viewerIp) {
         var allowed = payload[CTA.CATNIP];

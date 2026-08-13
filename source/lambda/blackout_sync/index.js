@@ -25,10 +25,10 @@ function computeIso(nowMs, offsetHours) {
     return new Date(nowMs + offsetHours * 3600 * 1000).toISOString();
 }
 
-async function collectScan(unityBase, gteIso, lteIso, perPage) {
+async function collectScan(apiBase, gteIso, lteIso, perPage) {
     const desired = new Map();
     const inScan = new Set();
-    for await (const b of iterateBroadcasts(unityBase, gteIso, lteIso, perPage)) {
+    for await (const b of iterateBroadcasts(apiBase, gteIso, lteIso, perPage)) {
         inScan.add(b.key);
         if (b.dma_list && Array.isArray(b.dma_list) && b.dma_list.length > 0) {
             desired.set(b.key, b.dma_list.join(","));
@@ -40,29 +40,29 @@ async function collectScan(unityBase, gteIso, lteIso, perPage) {
 exports.handler = async (event) => {
     const start = Date.now();
     const kvsArn = process.env.KVS_ARN;
-    const unityBase = process.env.BLACKOUT_API_BASE_URL;
+    const apiBase = process.env.BLACKOUT_API_BASE_URL;
     const perPage = parseInt(process.env.PAGE_SIZE || "1000", 10);
     const pastHours = parseInt(process.env.SCAN_WINDOW_PAST_HOURS || "24", 10);
     const futureHours = parseInt(process.env.SCAN_WINDOW_FUTURE_HOURS || "6", 10);
 
     if (!kvsArn) throw new Error("KVS_ARN not set");
-    if (!unityBase) throw new Error("BLACKOUT_API_BASE_URL not set");
+    if (!apiBase) throw new Error("BLACKOUT_API_BASE_URL not set");
 
     const gteIso = computeIso(start, -pastHours);
     const lteIso = computeIso(start, futureHours);
     console.log(JSON.stringify({
         msg: "reconcile_start",
-        unityBase,
-        kvsArn,
+        blackout_api_base: apiBase,
+        kvs_arn: kvsArn,
         window_hours_past: pastHours,
         window_hours_future: futureHours,
         start_time_gte: gteIso,
         start_time_lte: lteIso,
     }));
 
-    const { desired, inScan } = await collectScan(unityBase, gteIso, lteIso, perPage);
+    const { desired, inScan } = await collectScan(apiBase, gteIso, lteIso, perPage);
     console.log(JSON.stringify({
-        msg: "unity_scan_complete",
+        msg: "blackout_scan_complete",
         broadcasts_in_scan: inScan.size,
         broadcasts_with_dmas: desired.size,
     }));

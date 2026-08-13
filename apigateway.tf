@@ -30,11 +30,11 @@ resource "aws_api_gateway_rest_api" "this" {
   # allows them from a separate resource that depends on this one.
 }
 
-# VID-3449 (rehomed by VID-3484): resource policy restricts invoke on
-# POST /token to the drm-api-lambda role. AWS_IAM auth on the method +
-# this policy = only calls signed by that role's temporary creds reach
-# the integration. /revoke and /revoked stay open on the resource-policy
-# dimension (they're still individually AuthN'd if we add that later).
+# Resource policy restricts invoke on POST /token to the token-minter
+# role. AWS_IAM auth on the method + this policy = only calls signed by
+# that role's temporary creds reach the integration. /revoke and /revoked
+# stay open on the resource-policy dimension (they're still individually
+# AuthN'd if the consumer adds that later).
 #
 # Full-ARN Resource strings match what AWS stores — the service accepts
 # either the short form `execute-api:/*/...` or the full ARN as input,
@@ -172,14 +172,13 @@ resource "aws_api_gateway_deployment" "this" {
   # Also hash token_post.authorization so flipping the AWS_IAM gate
   # forces a fresh deployment out to the stage.
   #
-  # Do NOT include aws_api_gateway_rest_api.this.policy here. AWS
-  # normalizes the resource policy JSON on write-back (reorders keys,
-  # rewraps Principal), so sha1(jsonencode([...policy...])) evaluates
-  # differently on plan (config input) vs apply (state read-back),
-  # producing the "Provider produced inconsistent final plan" error
-  # deterministically. Resource policies attach at the API level and
-  # take effect immediately without a deployment, so the trigger was
-  # overzealous — policy changes don't need a stage redeploy anyway.
+  # Resource policies DO require an API deployment for changes to
+  # propagate — hash `var.drm_api_lambda_role_arn` here to force a
+  # redeploy whenever the pinned role flips. We hash the input variable,
+  # not `aws_api_gateway_rest_api_policy.this.policy`, because AWS
+  # normalizes the JSON on write-back (reorders keys, rewraps
+  # Principal), and hashing the read-back attribute would produce a
+  # "Provider produced inconsistent final plan" error deterministically.
   triggers = {
     redeployment = sha1(jsonencode([
       aws_api_gateway_resource.token.id,
@@ -192,6 +191,7 @@ resource "aws_api_gateway_deployment" "this" {
       aws_api_gateway_resource.revoked.id,
       aws_api_gateway_method.revoked_get.id,
       aws_api_gateway_integration.revoked_get.id,
+      var.drm_api_lambda_role_arn,
     ]))
   }
 

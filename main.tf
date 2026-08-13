@@ -4,8 +4,6 @@
 # See README.md for module usage.
 
 locals {
-  account_id  = var.account_id
-  region      = var.region
   environment = var.environment
   name_prefix = var.name_prefix
 
@@ -37,11 +35,9 @@ resource "random_password" "signing_key" {
 }
 
 resource "aws_secretsmanager_secret" "signing_key" {
-  name        = "${local.name_prefix}/${local.environment}/signing-key"
-  description = "CTA-5007-B HMAC signing key."
-
-  # Match CDK stack's removal semantics — stage can be destroyed clean.
-  recovery_window_in_days = local.environment == "prod" ? 30 : 0
+  name                    = "${local.name_prefix}/${local.environment}/signing-key"
+  description             = "CTA-5007-B HMAC signing key."
+  recovery_window_in_days = var.secret_recovery_window_days
 }
 
 resource "aws_secretsmanager_secret_version" "signing_key" {
@@ -77,7 +73,7 @@ resource "aws_cloudfront_function" "validator" {
     dma_enforcement_mode         = var.dma_enforcement_mode
     token_enforcement_mode       = var.token_enforcement_mode
     legacy_client_allowlist_json = jsonencode(var.legacy_client_allowlist)
-    broadcast_uri_prefix         = var.broadcast_uri_prefix
+    broadcast_uri_prefix_json    = jsonencode(var.broadcast_uri_prefix)
   })
 
   key_value_store_associations = [aws_cloudfront_key_value_store.this.arn]

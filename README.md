@@ -4,7 +4,7 @@ Terraform port of the AWS reference solution [**Secure Media Delivery at the Edg
 
 Feature-parity with the upstream CDK stack, plus:
 
-- **Two edge gates in one CloudFront Function.** Token validation and DMA blackout enforcement run inline on every viewer request, with independent `off` / `log` / `enforce` toggles.
+- **Two edge gates in one CloudFront Function.** Token validation and DMA blackout enforcement run inline on every viewer request, with independent `off` / `log` / `enforce` toggles. The token check enforces CTA-5007-B's `EXP`, `NBF`, `CATU` (URI prefix), `CATNIP` (IP allowlist), and `CATGEOISO3166` (country allowlist) claims. Revocation lookup on `CTI` returns `410 Gone` distinct from generic `401`.
 - **DMA blackout pipeline.** A dedicated `blackout-sync` Lambda reconciles per-broadcast blocklists from an upstream service into the CloudFront KeyValueStore on a 5-minute schedule. The validator joins the viewer's `CloudFront-Viewer-Metro-Code` against the blocklist and returns `451 Unavailable For Legal Reasons` on a match.
 - **User-Agent allowlist bridge.** Regex patterns matched against the viewer UA bypass token validation entirely — for legacy clients that can't ship CTA minting before enforcement lands. Sunsets when legacy clients age out.
 - **APIGW `/token` lockdown.** Optional `AWS_IAM` authorization + resource policy pinning `POST /api/token` to a single IAM role (typically your server-side token-minting Lambda). Anonymous callers hit 403 at APIGW.
@@ -66,17 +66,23 @@ See [`examples/basic/`](examples/basic/) for a full worked example.
 | Name | Description | Type | Default |
 |---|---|---|---|
 | `environment` | Deployment environment slug (e.g., `staging`, `prod`). Used in resource names and the APIGW `stage_name`. | `string` | *(required)* |
-| `blackout_api_base_url` | Base URL of the upstream service supplying per-broadcast DMA blocklists. Read from `<base>/v2/broadcasts/dmas`. | `string` | *(required)* |
-| `region` | AWS region. WAFv2 CLOUDFRONT scope requires `us-east-1`. | `string` | `"us-east-1"` |
+| `region` | AWS region. WAFv2 CLOUDFRONT-scoped resources always live in `us-east-1` regardless of this value. | `string` | `"us-east-1"` |
 | `account_id` | Optional guard: assert caller identity matches. Empty skips the check. | `string` | `""` |
 | `name_prefix` | Prefix for named resources. | `string` | `"cta-secure-media"` |
 | `signing_key_length` | HMAC signing key length in bytes. | `number` | `64` |
+| `secret_recovery_window_days` | Secrets Manager recovery window (in days) for the signing-key secret. `0` = immediate destroy (fine for throwaway envs); `7-30` keeps the secret recoverable for that window after `terraform destroy`. | `number` | `30` |
 | `rotation_schedule` | EventBridge schedule for the rotation Step Function. | `string` | `"rate(30 days)"` |
 | `demo_origin_domain` | Default-behavior origin. Override to point at a real content origin. | `string` | `"cdn.mediaplaypen.com"` |
-| `token_enforcement_mode` | Token gate: `off` skips check entirely; `log` computes but forwards + emits log line; `enforce` rejects with 401. | `string` | `"enforce"` |
-| `dma_enforcement_mode` | DMA gate: same shape as `token_enforcement_mode`. Enforcement returns `451` with body `blackout_dma`. | `string` | `"off"` |
+| `demo_bucket_force_destroy` | When true, `terraform destroy` empties + removes the demo S3 bucket even if it still holds objects. Set true for throwaway envs; false in prod so an accidental destroy fails loudly. | `bool` | `false` |
+| `token_enforcement_mode` | Token gate: `off` skips check entirely; `log` computes but forwards + emits log line; `enforce` rejects with 401. Recommended rollout: `off` → `log` → `enforce`. | `string` | `"enforce"` |
+| `dma_enforcement_mode` | DMA gate: same shape as `token_enforcement_mode`. `enforce` returns `451` with body `blackout_dma`. The blackout_sync Lambda + 5-min schedule are only created when this is `log` or `enforce`. | `string` | `"off"` |
+| `blackout_api_base_url` | Base URL of the upstream service supplying per-broadcast DMA blocklists. Read from `<base>/v2/broadcasts/dmas`. Required when `dma_enforcement_mode` is `log` or `enforce`; ignored when `off`. | `string` | `""` |
+| `broadcast_uri_prefix` | URI prefix under which broadcasts are served (e.g., `/broadcast/`). Used by the validator to extract the broadcast id from the request URI for DMA blocklist lookup. Must begin and end with a slash. | `string` | `"/broadcast/"` |
 | `drm_api_lambda_role_arn` | When non-empty, flips `POST /api/token` to `AWS_IAM` and pins invoke to this role via a resource policy. Empty = anonymous mint (reference-solution behavior). | `string` | `""` |
+| `token_rate_limit_per_5min` | WAFv2 rate-based limit (per source IP, 5-minute sliding window) on `POST /api/token`. Tune to your minter cadence — the default is well above one-mint-per-session traffic but tight enough to catch scraping. | `number` | `300` |
 | `legacy_client_allowlist` | Regex patterns matched against viewer `User-Agent`. Matching requests bypass the token check (DMA check still runs). Keep the list small (<20 entries) — matched linearly per request. | `list(string)` | `[]` |
+| `geo_restriction_type` | CloudFront distribution geo restriction: `none` / `whitelist` / `blacklist`. Distribution-level control (whole country blocked regardless of token); pair with `geo_restriction_locations` when non-`none`. | `string` | `"none"` |
+| `geo_restriction_locations` | ISO 3166-1 alpha-2 country codes for the geo restriction. Ignored when `geo_restriction_type = "none"`. | `list(string)` | `[]` |
 
 ## Outputs
 
