@@ -1,6 +1,6 @@
 # VID-3459 — blackout sync-writer.
 #
-# Reconciler Lambda that mirrors DMA blackout rules from unity-api
+# Reconciler Lambda that mirrors DMA blackout rules from blackout API
 # Postgres into CloudFront KVS every 5 minutes. Consumed by the CTA
 # validator (VID-3458) which reads `blackout:<broadcast_id>` per
 # viewer-request.
@@ -9,7 +9,7 @@
 
 data "archive_file" "lambda_blackout_sync" {
   type        = "zip"
-  source_dir  = "${path.module}/../source/lambda/blackout_sync"
+  source_dir  = "${path.module}/source/lambda/blackout_sync"
   output_path = "${path.module}/.terraform/lambda-blackout-sync.zip"
   excludes    = ["__tests__/**", "node_modules/.cache/**"]
 }
@@ -47,14 +47,14 @@ resource "aws_lambda_function" "blackout_sync" {
   environment {
     variables = {
       KVS_ARN                = aws_cloudfront_key_value_store.this.arn
-      UNITY_API_BASE         = var.unity_api_base
+      BLACKOUT_API_BASE_URL  = var.blackout_api_base_url
       PAGE_SIZE              = "1000"
       SCAN_WINDOW_PAST_HOURS = "24"
       # 6 hours forward is ~72 sync cycles of buffer at the 5-minute
       # EventBridge cadence. Broadcasts scheduled further out roll into
       # the window as their start_time approaches; the previous 30-day
       # window preloaded ~100x more broadcasts than needed and hammered
-      # unity-api for zero correctness benefit.
+      # blackout API for zero correctness benefit.
       SCAN_WINDOW_FUTURE_HOURS = "6"
     }
   }

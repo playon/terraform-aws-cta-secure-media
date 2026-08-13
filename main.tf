@@ -55,13 +55,14 @@ resource "aws_secretsmanager_secret_version" "signing_key" {
 # --------------------------------------------------------------------------
 # CloudFront Function — CTA validator.
 #
-# JS source lives at ../source/lambda/cta_token_validator.js (CDK
-# app's convention — everything under source/). Once VID-3439's port
-# is complete and source/ is deleted, move lambda*/ up one level and
-# update this path.
+# JS source lives at source/lambda/cta_token_validator.js.tftpl. Feature
+# flags (enforcement modes, allowlist, broadcast URI prefix) are baked in
+# at plan time via templatefile so the function stays a single-file
+# CloudFront Function with no runtime config lookups.
 #
-# In-repo reference means no drift with the SDK code the Lambdas use
-# (../source/lambda/sdk/cta-client.js), which is the important invariant.
+# In-repo reference means no drift with the SDK code the token-minter
+# Lambdas use (source/lambda/sdk/cta-client.js), which is the important
+# invariant.
 #
 # Consumers reference this function by ARN (see `validator_function_arn`
 # in outputs.tf) and attach it to the viewer-request phase of their own
@@ -72,10 +73,11 @@ resource "aws_cloudfront_function" "validator" {
   runtime = "cloudfront-js-2.0"
   comment = "CTA-5007-B CWT validator."
   publish = true
-  code = templatefile("${path.module}/../source/lambda/cta_token_validator.js.tftpl", {
+  code = templatefile("${path.module}/source/lambda/cta_token_validator.js.tftpl", {
     dma_enforcement_mode         = var.dma_enforcement_mode
     token_enforcement_mode       = var.token_enforcement_mode
     legacy_client_allowlist_json = jsonencode(var.legacy_client_allowlist)
+    broadcast_uri_prefix         = var.broadcast_uri_prefix
   })
 
   key_value_store_associations = [aws_cloudfront_key_value_store.this.arn]

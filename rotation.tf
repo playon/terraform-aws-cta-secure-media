@@ -5,7 +5,7 @@
 
 data "archive_file" "lambda_sync_keys" {
   type        = "zip"
-  source_dir  = "${path.module}/../source/lambda/sync_keys"
+  source_dir  = "${path.module}/source/lambda/sync_keys"
   output_path = "${path.module}/.terraform/lambda-sync-keys.zip"
 }
 

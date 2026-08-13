@@ -1,7 +1,7 @@
 const { test, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 const http = require("node:http");
-const { iterateBroadcasts } = require("../unity_client");
+const { iterateBroadcasts } = require("../blackout_client");
 
 let server;
 let baseUrl;
@@ -79,5 +79,5 @@ test("iterate: throws on non-2xx", async () => {
     handler = () => ({ status: 500, body: { error: "boom" } });
     await assert.rejects(async () => {
         for await (const _ of iterateBroadcasts(baseUrl, "2026-07-24T00:00:00Z", "2026-08-23T00:00:00Z", 100)) { /* noop */ }
-    }, /unity-api 500/);
+    }, /blackout API 500/);
 });

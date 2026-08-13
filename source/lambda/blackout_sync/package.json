@@ -1,7 +1,7 @@
 {
   "name": "cta-blackout-sync",
   "version": "1.0.0",
-  "description": "Mirror unity-api DMA blackout rules into CloudFront KVS. VID-3459.",
+  "description": "Mirror upstream DMA blackout rules into CloudFront KVS. VID-3459.",
   "main": "index.js",
   "private": true,
   "scripts": {

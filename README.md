@@ -25,7 +25,7 @@ module "cta" {
 
   environment    = "prod"
   account_id     = "123456789012"                     # optional caller-identity guard
-  unity_api_base = "https://api.example.com"           # upstream service that supplies DMA blocklists
+  blackout_api_base_url = "https://api.example.com"           # upstream service that supplies DMA blocklists
 
   # Enable the token gate — flip to "log" first, then "enforce"
   # once clients are minting tokens.
@@ -66,7 +66,7 @@ See [`examples/basic/`](examples/basic/) for a full worked example.
 | Name | Description | Type | Default |
 |---|---|---|---|
 | `environment` | Deployment environment slug (e.g., `staging`, `prod`). Used in resource names and the APIGW `stage_name`. | `string` | *(required)* |
-| `unity_api_base` | Base URL of the upstream service supplying per-broadcast DMA blocklists. Read from `<base>/v2/broadcasts/dmas`. | `string` | *(required)* |
+| `blackout_api_base_url` | Base URL of the upstream service supplying per-broadcast DMA blocklists. Read from `<base>/v2/broadcasts/dmas`. | `string` | *(required)* |
 | `region` | AWS region. WAFv2 CLOUDFRONT scope requires `us-east-1`. | `string` | `"us-east-1"` |
 | `account_id` | Optional guard: assert caller identity matches. Empty skips the check. | `string` | `""` |
 | `name_prefix` | Prefix for named resources. | `string` | `"cta-secure-media"` |
@@ -93,10 +93,10 @@ See [`examples/basic/`](examples/basic/) for a full worked example.
 
 ## Upstream DMA blocklist contract
 
-The `blackout-sync` Lambda expects `<unity_api_base>/v2/broadcasts/dmas` to accept:
+The `blackout-sync` Lambda expects `<blackout_api_base_url>/v2/broadcasts/dmas` to accept:
 
 - `start_time_gte` and `start_time_lte` — ISO 8601 timestamps bounding the scan window
-- `exclude_pixellot=true` — filter out broadcasts sourced from the Pixellot platform (drop this in `source/lambda/blackout_sync/unity_client.js` if not relevant to your setup)
+- `exclude_pixellot=true` — filter out broadcasts sourced from the Pixellot platform (drop this in `source/lambda/blackout_sync/blackout_client.js` if not relevant to your setup)
 - `per_page` and `page` — pagination
 
 And return an array of `{ key: string, dma_list: number[] | null }` objects. Adapt `source/lambda/blackout_sync/` if your upstream shape differs.
@@ -105,20 +105,20 @@ And return an array of `{ key: string, dma_list: number[] | null }` objects. Ada
 
 - 1× CloudFront KeyValueStore (signing key + revocation list + per-broadcast DMA blocklists)
 - 1× Secrets Manager secret + version (HMAC signing key)
-- 8× Lambda functions (Node token generator, Python variant, Ruby variant, revoker, list-revoked, KVS-cleanup, sync-keys, blackout-sync)
+- 6× Lambda functions (Node token generator, revoker, list-revoked, KVS-cleanup, sync-keys, blackout-sync)
 - 1× Step Functions state machine + EventBridge schedule (30-day key rotation)
 - 1× EventBridge schedule (hourly KVS revocation cleanup)
 - 1× EventBridge schedule (5-minute DMA blocklist reconcile)
 - 1× CloudFront distribution (demo/reference) + 1× cache policy + 1× OAC
 - 2× CloudFront Functions (CTA validator + `/api/*` path rewriter)
 - 1× CloudFront realtime log config + 1× Kinesis stream
-- 1× API Gateway REST API with 5 resources (token, token-python, token-ruby, revoke, revoked)
+- 1× API Gateway REST API with 3 resources (token, revoke, revoked)
 - 1× WAFv2 Web ACL (rate limit on `POST /api/token`)
 - 1× S3 demo bucket + demo website files
 
 ## Relationship to upstream
 
-This is an independent port maintained by [PlayOn! Sports](https://github.com/playon), not officially blessed by AWS. The CTA-5007-B specification and the runtime Lambda code (`source/**`) are largely unchanged from the upstream reference solution, with additions for the DMA blackout gate and the UA allowlist. The Terraform configuration is original work.
+This is an independent port maintained by [PlayOn! Sports](https://github.com/playon), not officially blessed by AWS. The CTA-5007-B specification and the runtime Lambda code (`source/**`) are largely unchanged from the upstream reference solution, with additions for the DMA blackout gate and the UA allowlist, and with the Python and Ruby token-minter ports removed — this fork only ships the Node minter. The Terraform configuration is original work.
 
 Upstream CDK reference: <https://github.com/aws-solutions-library-samples/secure-media-delivery-at-the-edge-on-aws>
 

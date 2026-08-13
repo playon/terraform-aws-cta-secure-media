@@ -18,8 +18,9 @@ provider "aws" {
 module "cta" {
   source = "../.."
 
-  environment = "dev"
-  # account_id  = "123456789012"  # optional guard
+  environment           = "dev"
+  blackout_api_base_url = "https://example.invalid/api" # required — point at your DMA blocklist upstream
+  # account_id          = "123456789012"                # optional guard
 }
 
 output "validator_function_arn" {

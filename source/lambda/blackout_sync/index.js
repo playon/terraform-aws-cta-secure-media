@@ -18,7 +18,7 @@
  * commit, exits without touching KVS.
  */
 
-const { iterateBroadcasts } = require("./unity_client");
+const { iterateBroadcasts } = require("./blackout_client");
 const { reconcile } = require("./kvs_client");
 
 function computeIso(nowMs, offsetHours) {
@@ -40,13 +40,13 @@ async function collectScan(unityBase, gteIso, lteIso, perPage) {
 exports.handler = async (event) => {
     const start = Date.now();
     const kvsArn = process.env.KVS_ARN;
-    const unityBase = process.env.UNITY_API_BASE;
+    const unityBase = process.env.BLACKOUT_API_BASE_URL;
     const perPage = parseInt(process.env.PAGE_SIZE || "1000", 10);
     const pastHours = parseInt(process.env.SCAN_WINDOW_PAST_HOURS || "24", 10);
     const futureHours = parseInt(process.env.SCAN_WINDOW_FUTURE_HOURS || "6", 10);
 
     if (!kvsArn) throw new Error("KVS_ARN not set");
-    if (!unityBase) throw new Error("UNITY_API_BASE not set");
+    if (!unityBase) throw new Error("BLACKOUT_API_BASE_URL not set");
 
     const gteIso = computeIso(start, -pastHours);
     const lteIso = computeIso(start, futureHours);

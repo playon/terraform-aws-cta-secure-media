@@ -46,9 +46,40 @@ variable "demo_origin_domain" {
   nullable    = false
 }
 
-variable "unity_api_base" {
+variable "geo_restriction_type" {
   type        = string
-  description = "Base URL of the upstream service the blackout sync-writer reads per-broadcast DMA blocklists from. The Lambda hits `<base>/v2/broadcasts/dmas`. Anonymous read endpoint by default; if your upstream needs auth, extend `source/lambda/blackout_sync/unity_client.js`."
+  description = "CloudFront distribution geo restriction. 'none' allows worldwide access; 'whitelist' + `geo_restriction_locations` limits to the listed ISO country codes; 'blacklist' blocks those. Default 'none' since the module is meant to work worldwide out of the box; set a whitelist if your CDN policy requires it."
+  default     = "none"
+  nullable    = false
+
+  validation {
+    condition     = contains(["none", "whitelist", "blacklist"], var.geo_restriction_type)
+    error_message = "geo_restriction_type must be one of: none, whitelist, blacklist."
+  }
+}
+
+variable "geo_restriction_locations" {
+  type        = list(string)
+  description = "ISO 3166-1 alpha-2 country codes for the geo restriction. Ignored when geo_restriction_type = 'none'. Example: [\"US\", \"CA\"]."
+  default     = []
+  nullable    = false
+}
+
+variable "broadcast_uri_prefix" {
+  type        = string
+  description = "URI prefix under which broadcasts are served (e.g., '/broadcast/'). The validator uses this to extract the broadcast id from the request URI for DMA blackout lookup. Must begin and end with a slash. Set to the prefix that fronts your own content."
+  default     = "/broadcast/"
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^/.*/$", var.broadcast_uri_prefix))
+    error_message = "broadcast_uri_prefix must start and end with '/', e.g., '/broadcast/'."
+  }
+}
+
+variable "blackout_api_base_url" {
+  type        = string
+  description = "Base URL of the upstream service the blackout sync-writer reads per-broadcast DMA blocklists from. The Lambda hits `<base>/v2/broadcasts/dmas`. Anonymous read endpoint by default; if your upstream needs auth, extend `source/lambda/blackout_sync/blackout_client.js`."
   nullable    = false
 }
 

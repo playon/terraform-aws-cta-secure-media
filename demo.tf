@@ -11,10 +11,10 @@
 
 resource "aws_s3_bucket" "demo" {
   bucket_prefix = "${local.name_prefix}-${local.environment}-demo-"
-  # Stage: force_destroy so `terraform destroy` wipes the bucket cleanly.
-  # PROD_TODO: flip to false (or make env-gated) on the prod cutover so
-  # accidental destroys fail loudly rather than silently take down demo
-  # objects. See README "Prod cutover" section.
+  # Non-prod environments get force_destroy = true so `terraform destroy`
+  # wipes the bucket cleanly during tear-down. Prod flips to false so an
+  # accidental destroy fails loudly rather than silently taking demo
+  # objects with it.
   force_destroy = local.environment == "prod" ? false : true
 }
 
@@ -57,12 +57,12 @@ resource "aws_s3_bucket_policy" "demo" {
 
 # Upload every file under resources/demo-website/ to s3://<bucket>/website/
 resource "aws_s3_object" "demo_files" {
-  for_each = fileset("${path.module}/../source/resources/demo-website", "**/*")
+  for_each = fileset("${path.module}/source/resources/demo-website", "**/*")
 
   bucket = aws_s3_bucket.demo.id
   key    = "website/${each.value}"
-  source = "${path.module}/../source/resources/demo-website/${each.value}"
-  etag   = filemd5("${path.module}/../source/resources/demo-website/${each.value}")
+  source = "${path.module}/source/resources/demo-website/${each.value}"
+  etag   = filemd5("${path.module}/source/resources/demo-website/${each.value}")
 
   content_type = lookup(
     {

@@ -122,10 +122,10 @@ resource "aws_cloudfront_distribution" "this" {
   web_acl_id      = aws_wafv2_web_acl.this.arn
 
   # Default behavior — validator on viewer-request, real-time logs.
-  # Origin is the CDK reference solution's demo playback host — fine for
-  # stage smoke tests. PROD_TODO: point at the real prod content origin
-  # (MediaPackage endpoint, our CDN, whatever) via var.demo_origin_domain
-  # in the prod tfvars. See README "Prod cutover" section.
+  # Origin defaults to the CDK reference solution's demo playback host
+  # for out-of-the-box smoke testing. Override `var.demo_origin_domain`
+  # to point at your real content origin (MediaPackage endpoint,
+  # your CDN, etc.) once you're past the smoke phase.
   origin {
     origin_id   = "demo-origin"
     domain_name = var.demo_origin_domain
@@ -214,14 +214,14 @@ resource "aws_cloudfront_distribution" "this" {
   # InvalidArgument at apply time, so we can't add belt-and-suspenders
   # at the distribution layer.
 
-  # Cloud Custodian remediates CF distributions in this org to a US-only
-  # whitelist. Codified here so TF and Custodian agree — otherwise TF sets
-  # "none" on apply and Custodian flips it back to whitelist on its next
-  # sweep, cycling the tag drift indefinitely.
+  # Geo restriction is off by default — most CDN policies don't require
+  # one. If your compliance / licensing rules do, set var.geo_restriction_type
+  # = "whitelist" and populate var.geo_restriction_locations with the
+  # allowed ISO country codes.
   restrictions {
     geo_restriction {
-      restriction_type = "whitelist"
-      locations        = ["US"]
+      restriction_type = var.geo_restriction_type
+      locations        = var.geo_restriction_locations
     }
   }
 

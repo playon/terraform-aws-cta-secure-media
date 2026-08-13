@@ -1,5 +1,5 @@
 /**
- * Read-only client for unity-api's /v2/broadcasts/dmas endpoint.
+ * Read-only client for blackout API's /v2/broadcasts/dmas endpoint.
  *
  * Slim endpoint returning {key, dma_list} per broadcast in the scan
  * window. dma_list is the effective value (Broadcast#dma_list resolves
@@ -32,7 +32,7 @@ async function fetchPage(baseUrl, page, perPage, startTimeGteIso, startTimeLteIs
     }
     const res = await fetch(url.toString());
     if (!res.ok) {
-        throw new Error(`unity-api ${res.status} on ${url}`);
+        throw new Error(`blackout API ${res.status} on ${url}`);
     }
     return res.json();
 }

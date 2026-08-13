@@ -17,7 +17,7 @@
 
 data "archive_file" "lambda_node" {
   type        = "zip"
-  source_dir  = "${path.module}/../source/lambda"
+  source_dir  = "${path.module}/source/lambda"
   output_path = "${path.module}/.terraform/lambda-node.zip"
   # Exclude the sync_keys subdir — it's a separate function.
   # Exclude *.tftpl — the CTA validator ships as a Terraform template

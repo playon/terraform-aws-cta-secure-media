@@ -22,6 +22,7 @@ function render(overrides) {
     token_enforcement_mode: 'enforce',
     dma_enforcement_mode: 'off',
     legacy_client_allowlist_json: '[]',
+    broadcast_uri_prefix: '/broadcast/',
   };
   const values = Object.assign({}, defaults, overrides || {});
   let src = fs.readFileSync(TEMPLATE_PATH, 'utf8');

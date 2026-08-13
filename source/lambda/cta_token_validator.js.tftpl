@@ -7,6 +7,7 @@ import cf from 'cloudfront';
 
 var TOKEN_ENFORCEMENT_MODE = "${token_enforcement_mode}";
 var DMA_ENFORCEMENT_MODE = "${dma_enforcement_mode}";
+var BROADCAST_URI_PREFIX = "${broadcast_uri_prefix}";
 
 // VID-3464: pre-compile UA allowlist at init.
 var LEGACY_CLIENT_ALLOWLIST_PATTERNS = (function () {
@@ -38,8 +39,11 @@ function tokenReject(request, statusCode, reason) {
 }
 
 function extractBroadcastId(uri) {
-    var m = /^\/broadcast\/([^\/]+)/.exec(uri);
-    return m ? m[1] : null;
+    if (uri.indexOf(BROADCAST_URI_PREFIX) !== 0) return null;
+    var rest = uri.substring(BROADCAST_URI_PREFIX.length);
+    var slash = rest.indexOf('/');
+    var id = slash === -1 ? rest : rest.substring(0, slash);
+    return id.length ? id : null;
 }
 
 function extractPathToken(request) {
