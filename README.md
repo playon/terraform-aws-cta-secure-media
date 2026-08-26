@@ -80,6 +80,15 @@ The validator reads two CloudFront-populated viewer headers:
 
 **CloudFront only populates viewer-* headers when they're on the attached cache policy's whitelist.** The cache policy this module ships (`aws_cloudfront_cache_policy.validator_headers`) whitelists both, but when you attach `validator_function_arn` to your own distribution's cache behavior, that behavior's cache policy also needs to forward them — the managed `CachingOptimized` / `CachingDisabled` policies forward *no* headers and will silently break both gates. Missing `Country` returns `401 geo_restricted` on every token carrying a 316 claim; missing `Metro-Code` fail-opens the DMA gate (auditable via the `blackout_dma_missing_metro` CloudWatch log line).
 
+### Cache-key cost of the visibility requirement
+
+The two viewer-* headers this module needs don't just have to be forwarded to the origin — they have to be in the *cache key* of the behavior the validator is attached to, or the function can't see them (see above). That makes the cache key vary by geography, and the cost can be substantial on high-volume paths:
+
+- **Cardinality.** Adding `CloudFront-Viewer-Metro-Code` to a US-served behavior's cache key multiplies cache slots by ~210 (one per Nielsen DMA) *per URI*. Adding `CloudFront-Viewer-Country` adds a country dimension on top. Fine on low-request paths (master playlist, sparse assets); painful on high-request ones (per-viewer manifest polling), where every cold slot is an origin miss.
+- **Don't couple query-string forwarding with the headers list via legacy `forwarded_values`.** In legacy mode the cache key is the cross-product of forwarded headers and `query_string=true`; on manifest paths with a handful of query params, hit ratio drops from the mid-90s % to single digits under real load. Attach a modern cache/origin-request policy pair (`cache_policy_id` + `origin_request_policy_id`) instead — cache-key composition and origin forwarding become independent, and only the fields you name land in the key.
+- **Enable Origin Shield on the origin behind this behavior.** Shield is a second cache layer keyed the same way as the edge, so it collapses `variants × POPs` edge misses into `variants` origin fetches — restoring most of what the DMA multiplier costs. On a Lambda or API Gateway origin, running without shield is a *concurrency* exposure at peak, not just a cost delta: worst-case miss fan-out becomes `variants × active-POP count` against the origin, all at once.
+- **Disable shield with `origin_shield = null`, never `{ enabled = false, ... }`.** CloudFront doesn't persist a region when shield is off, so a disabled block with `origin_shield_region` set produces a perpetual plan diff on every subsequent `terraform plan`.
+
 ## Inputs
 
 | Name | Description | Type | Default |
