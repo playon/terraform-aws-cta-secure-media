@@ -86,7 +86,15 @@ resource "aws_cloudfront_realtime_log_config" "this" {
 
 # --- Custom cache policy for default behavior (allowlist Country header) --
 
-resource "aws_cloudfront_cache_policy" "with_country_header" {
+# Cache policy for the default (content) behavior. The validator needs
+# BOTH CloudFront-Viewer-Country (per-token CATGEOISO3166 country
+# check) and CloudFront-Viewer-Metro-Code (per-broadcast DMA blackout
+# check) — CloudFront only populates viewer-* headers when they're on
+# the cache policy's whitelist. If a header isn't forwarded, its gate
+# silently fails: country-missing rejects every geo-scoped token with
+# 401 geo_restricted, and metro-missing takes the DMA gate's fail-open
+# branch and logs a `blackout_dma_missing_metro` line.
+resource "aws_cloudfront_cache_policy" "validator_headers" {
   name        = "${local.name_prefix}-${local.environment}-cache-policy"
   min_ttl     = 0
   default_ttl = 86400
@@ -107,7 +115,10 @@ resource "aws_cloudfront_cache_policy" "with_country_header" {
     headers_config {
       header_behavior = "whitelist"
       headers {
-        items = ["CloudFront-Viewer-Country"]
+        items = [
+          "CloudFront-Viewer-Country",
+          "CloudFront-Viewer-Metro-Code",
+        ]
       }
     }
   }
@@ -121,10 +132,14 @@ resource "aws_cloudfront_distribution" "this" {
   comment         = "CTA-5007-B secure media distribution."
   web_acl_id      = aws_wafv2_web_acl.this.arn
 
-  # Default behavior — demo origin, validator on viewer-request, real-time logs
+  # Default behavior — validator on viewer-request, real-time logs.
+  # Origin defaults to the CDK reference solution's demo playback host
+  # for out-of-the-box smoke testing. Override `var.demo_origin_domain`
+  # to point at your real content origin (MediaPackage endpoint,
+  # your CDN, etc.) once you're past the smoke phase.
   origin {
     origin_id   = "demo-origin"
-    domain_name = "cdn.mediaplaypen.com"
+    domain_name = var.demo_origin_domain
 
     custom_origin_config {
       http_port                = 80
@@ -142,7 +157,7 @@ resource "aws_cloudfront_distribution" "this" {
     allowed_methods          = ["GET", "HEAD"]
     cached_methods           = ["GET", "HEAD"]
     compress                 = true
-    cache_policy_id          = aws_cloudfront_cache_policy.with_country_header.id
+    cache_policy_id          = aws_cloudfront_cache_policy.validator_headers.id
     origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id
     realtime_log_config_arn  = aws_cloudfront_realtime_log_config.this.arn
 
@@ -155,7 +170,7 @@ resource "aws_cloudfront_distribution" "this" {
   # /api/* → APIGW (with the URL-rewrite function stripping /api/ prefix)
   origin {
     origin_id   = "api-origin"
-    domain_name = "${aws_api_gateway_rest_api.this.id}.execute-api.${data.aws_region.current.region}.amazonaws.com"
+    domain_name = "${aws_api_gateway_rest_api.this.id}.execute-api.${data.aws_region.current.name}.amazonaws.com"
     origin_path = "/${aws_api_gateway_stage.prod.stage_name}"
 
     custom_origin_config {
@@ -201,9 +216,23 @@ resource "aws_cloudfront_distribution" "this" {
     cache_policy_id        = data.aws_cloudfront_cache_policy.caching_optimized.id
   }
 
+  # Cache safety for viewer-specific rejections from the CTA validator
+  # (451 DMA blackout / 410 token revoked) is enforced solely by the
+  # Cache-Control: no-store header the function returns — see
+  # source/lambda/cta_token_validator.js.tftpl. CloudFront's
+  # custom_error_response only accepts a fixed set of status codes
+  # (400, 403, 404, 405, 414, 416, 500-504); 410 and 451 both return
+  # InvalidArgument at apply time, so we can't add belt-and-suspenders
+  # at the distribution layer.
+
+  # Geo restriction is off by default — most CDN policies don't require
+  # one. If your compliance / licensing rules do, set var.geo_restriction_type
+  # = "whitelist" and populate var.geo_restriction_locations with the
+  # allowed ISO country codes.
   restrictions {
     geo_restriction {
-      restriction_type = "none"
+      restriction_type = var.geo_restriction_type
+      locations        = var.geo_restriction_locations
     }
   }
 

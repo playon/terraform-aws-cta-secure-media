@@ -1,12 +1,17 @@
 # S3 demo bucket + upload of resources/demo-website/.
 #
-# The distribution's /website/* behavior + demo-website origin serve
-# from this bucket. Ported from the CDK reference solution's demo
-# webpage; useful for smoke-testing token flow end-to-end.
+# Currently unconditional — matches the CDK reference solution's
+# enableDemo=true default. If you don't want the demo files in prod,
+# add an `enable_demo` variable and gate these resources with
+# `count`; the distribution's /website/* behavior + demo-website
+# origin need matching conditionalization at that time.
+#
+# Dashboard is not included in this port (was optional in the CDK
+# stack too).
 
 resource "aws_s3_bucket" "demo" {
   bucket_prefix = "${local.name_prefix}-${local.environment}-demo-"
-  force_destroy = true
+  force_destroy = var.demo_bucket_force_destroy
 }
 
 resource "aws_s3_bucket_public_access_block" "demo" {

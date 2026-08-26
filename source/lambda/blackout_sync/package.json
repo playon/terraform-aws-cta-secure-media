@@ -1,0 +1,14 @@
+{
+  "name": "cta-blackout-sync",
+  "version": "1.0.0",
+  "description": "Mirror upstream DMA blackout rules into CloudFront KVS.",
+  "main": "index.js",
+  "private": true,
+  "scripts": {
+    "test": "node --test __tests__/*.test.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cloudfront-keyvaluestore": "^3.699.0",
+    "@aws-sdk/signature-v4a": "^3.699.0"
+  }
+}

@@ -65,16 +65,17 @@ resource "aws_lambda_function" "sync_keys" {
 #
 # CDK wraps this Lambda in a CustomResource with `Timestamp: Date.now()`
 # to force invocation on each deploy. TF equivalent: aws_lambda_invocation
-# resource with input keyed on the current secret version, so a new secret
-# rotation triggers a resync.
+# with a CFN-shaped event so the Lambda's existing RequestType branch
+# fires without needing a code change (see source/lambda/sync_keys/index.js
+# — it checks event.RequestType for the CDK path, event.rotate for the
+# SFN path). Rerun is keyed on the secret version so a rotation-driven
+# secret change triggers a resync on the next apply.
 resource "aws_lambda_invocation" "initial_key_sync" {
   function_name = aws_lambda_function.sync_keys.function_name
   input = jsonencode({
-    initial_sync   = true
+    RequestType    = "Create"
     secret_version = aws_secretsmanager_secret_version.signing_key.version_id
   })
-  # Rerun on every apply where the secret version changes. Not tied to
-  # `timestamp()` — that would rerun every apply regardless.
   triggers = {
     secret_version = aws_secretsmanager_secret_version.signing_key.version_id
   }

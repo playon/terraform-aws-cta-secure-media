@@ -2,6 +2,15 @@
   "name": "cta-token-generator",
   "version": "1.0.0",
   "private": true,
+  "scripts": {
+    "test": "jest"
+  },
+  "jest": {
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "<rootDir>/blackout_sync/"
+    ]
+  },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1035.0",
     "@aws-sdk/client-cloudfront-keyvaluestore": "^3.1034.0",

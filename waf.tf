@@ -1,5 +1,5 @@
-# WAFv2 Web ACL — rate-limit POST /api/token per source IP.
-# mitigation for automated CWT minting scrape attempts.
+# WAFv2 Web ACL — rate-limit POST /api/token per source IP. Mitigates
+# automated CWT minting attempts even when the IAM lockdown is off.
 
 locals {
   rate_limit_body_key = "CTAWebAclRateLimit429"
