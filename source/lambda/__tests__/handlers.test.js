@@ -138,13 +138,13 @@ describe('CTA mint rotation boundaries', () => {
     expect(mockSend).toHaveBeenCalledTimes(3);
   });
 
-  test.each([0, -1, 1.5, null, false, '', 'bad', '0s', '25h', 86401])('rejects unsupported TTL %p before fetching a key', async ttl => {
+  test.each([0, -1, 1.5, null, false, '', 'bad', '0s', '2h1', '121m', '3h', '1d', '25h', 7201, 86400, 86401])('rejects unsupported TTL %p before fetching a key', async ttl => {
     const result = await handler(event(ttl));
     expect(result.statusCode).toBe(500);
     expect(JSON.parse(result.body).error).toContain('TTL must be');
     expect(mockSend).not.toHaveBeenCalled();
   });
-  test.each([['1d', 86400], [86400, 86400], [undefined, 7200]])('accepts supported TTL %p', async (ttl, seconds) => {
+  test.each([['1h', 3600], ['2h', 7200], ['120m', 7200], [7200, 7200], [undefined, 7200]])('accepts supported TTL %p', async (ttl, seconds) => {
     mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ signingKey: 'key' }) });
     const result = await handler(event(ttl));
     expect(result.statusCode).toBe(200);

@@ -48,8 +48,8 @@ function parseTTL(ttl) {
         const match = ttl.match(/^(\d+)([smhd])$/);
         seconds = match ? Number(match[1]) * { s: 1, m: 60, h: 3600, d: 86400 }[match[2]] : NaN;
     }
-    if (!Number.isInteger(seconds) || seconds <= 0 || seconds > 86400) {
-        throw new Error('TTL must be a positive integer duration of at most 86400 seconds');
+    if (!Number.isInteger(seconds) || seconds <= 0 || seconds > 7200) {
+        throw new Error('TTL must be a positive integer duration of at most 7200 seconds');
     }
     return seconds;
 }

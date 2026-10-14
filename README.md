@@ -100,7 +100,7 @@ The two viewer-* headers this module needs don't just have to be forwarded to th
 | `secret_recovery_window_days` | Secrets Manager recovery window (in days) for the signing-key secret. `0` = immediate destroy (fine for throwaway envs); `7-30` keeps the secret recoverable for that window after `terraform destroy`. | `number` | `30` |
 | `rotation_schedule` | EventBridge schedule for the rotation Step Function. | `string` | `"rate(30 days)"` |
 | `rotation_enabled` | Opt in only after the coordinated deployment/rotation gate passes. | `bool` | `false` |
-| `rotation_overlap_seconds` | Previous-key overlap after promotion, minimum 86400; cache/in-flight margins added automatically. | `number` | `86400` |
+| `rotation_overlap_seconds` | Previous-key overlap after promotion, minimum 7200; cache/in-flight margins added automatically. Increase to cover legacy token lifetimes when needed. | `number` | `7200` |
 | `rotation_propagation_seconds` | Verified edge propagation allowance before mint promotion, minimum 300. | `number` | `300` |
 | `demo_origin_domain` | Default-behavior origin. Override to point at a real content origin. | `string` | `"cdn.mediaplaypen.com"` |
 | `demo_bucket_force_destroy` | When true, `terraform destroy` empties + removes the demo S3 bucket even if it still holds objects. Set true for throwaway envs; false in prod so an accidental destroy fails loudly. | `bool` | `false` |
@@ -136,22 +136,23 @@ The Step Functions workflow uses one stable execution ARN as its rotation ID:
 1. **Prepare:** atomically publish the new raw signing key at `key:default`, the old key at `key:previous` as `{"signingKey":"…","expiresAt":null}`, and ownership state at `key:rotation`. The mint still reads the old Secrets Manager `AWSCURRENT` version. Both keys validate; normal token expiry, revocation, and policy checks still apply.
 2. **Wait for propagation:** wait at least 300 seconds, measured from confirmation of the atomic KVS update. This is a configured propagation allowance, **not an acknowledgement from every edge location**. Verify the allowance for each deployment before allowing rotation; increase it if needed.
 3. **Promote:** create an idempotent `AWSPENDING` secret version, then move `AWSCURRENT` with the old version as an ownership guard. Confirm the new version before starting the overlap clock.
-4. **Finalize overlap:** set the previous-key expiry to promotion confirmation + configured overlap + 60-second mint-cache allowance + 60-second in-flight allowance. Overlap must be at least 86400 seconds. At expiry, validators reject old-key signatures even if physical cleanup is delayed.
+4. **Finalize overlap:** set the previous-key expiry to promotion confirmation + configured overlap + 60-second mint-cache allowance + 60-second in-flight allowance. Overlap must be at least 7200 seconds (2 hours). At expiry, validators reject old-key signatures even if physical cleanup is delayed.
 5. **Cleanup:** after the deadline, confirm the mint still uses the new version, remove the pending label, and atomically delete `key:previous` and remove signing material from active rotation state. A key-free completion tombstone prevents old execution retries from affecting later rotations.
 
-Lambda mints refresh their signing key within **60 seconds** of a fetch starting, including fetch latency. A failed refresh refuses to mint with stale cached material. Supported TTLs are positive integer seconds or integer `s/m/h/d` durations, up to **86400 seconds (1 day)**; only an omitted TTL defaults to `2h`.
+Lambda mints refresh their signing key within **60 seconds** of a fetch starting, including fetch latency. A failed refresh refuses to mint with stale cached material. Supported TTLs are positive integer seconds or integer `s/m/h/d` durations, up to **7200 seconds (2 hours)**; only an omitted TTL defaults to `2h`. Durations above that maximum, including `1d`, are rejected.
 
 ### Failure recovery and deployment gate
 
 - Deploy validators and mints before changing rotation behavior. Keep existing EventBridge rotation rules disabled during rollout; applying these changes sets the schedule disabled unless explicitly opted in. Do not invoke the old `{rotate:true}` Lambda interface.
-- Inventory legacy/custom issuer TTLs. Previously issued tokens longer than one day must expire before the first rotation, or the configured overlap must cover their maximum remaining lifetime. All continuing issuers must comply with the supported TTL/cache bounds.
+- **Interim deployment block:** live rotation schedule disables are out-of-band changes against old `main`, not protection encoded in that revision. Do not apply CTA roots sourced from old `main` until the reviewed disabled-default branch is deployed; an old-main apply can re-enable rotation. Keep manual rotation blocked throughout this gate.
+- Inventory legacy/custom issuer TTLs. Previously issued tokens longer than 2 hours must expire before the first rotation, or the configured overlap must cover their maximum remaining lifetime. Longer overlap remains configurable for these legacy tokens. All continuing issuers must comply with the supported TTL/cache bounds.
 - Verify old- and new-key requests through the actual CloudFront distribution, warm mint refresh, original token expiry, revocation/policy checks, and previous-key expiry/deletion. Local cryptographic tests do not prove AWS edge propagation.
 - Consumers attached to an unchanged validator ARN do not need a distribution code/configuration change. Deploy the owning CTA stack, publish the updated LIVE function, and verify through the existing consumer distribution before permitting rotation. If the function ARN changes, update the consumer association only after the replacement validator and mint are ready.
 - Redrive a failed Step Functions execution with its **same execution ARN**. Do not start a second rotation or overwrite KVS/secret state. CAS ownership rejects competing executions. Initial deployment sync skips an active rotation rather than resetting it.
 - Before confirmed promotion, the previous-key deadline stays `null`, so a partial failure cannot expire the key still used by the mint. Resume the execution to finish promotion/finalization. After finalization, an interrupted cleanup does not extend signature acceptance; resume cleanup to physically delete the retained key.
 - Rotation inputs, outputs, and logs contain no signing material. Do not enable SDK wire logging or print KVS/secret contents during troubleshooting.
 
-Terraform controls: `rotation_enabled = false`, `rotation_overlap_seconds = 86400`, and `rotation_propagation_seconds = 300` by default. The monthly cadence applies only after opt-in.
+Terraform controls: `rotation_enabled = false`, `rotation_overlap_seconds = 7200` (minimum 7200), and `rotation_propagation_seconds = 300` by default. The monthly cadence applies only after opt-in.
 
 Terraform removes full-line JavaScript comments from the uploaded validator, retaining readable source while leaving room for configured allowlists within CloudFront's 10 KiB limit.
 

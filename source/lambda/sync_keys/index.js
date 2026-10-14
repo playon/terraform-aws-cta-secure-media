@@ -160,7 +160,7 @@ async function prepare(secretName, kvsArn, view, executionId) {
     if (view.previous !== undefined) {
         throw failure("RotationKeyConflict", "A previous signing key is still retained");
     }
-    const overlapSeconds = seconds("ROTATION_OVERLAP_SECONDS", 86400, 86400);
+    const overlapSeconds = seconds("ROTATION_OVERLAP_SECONDS", 7200, 7200);
     const propagationSeconds = seconds("ROTATION_PROPAGATION_SECONDS", 300, 300);
     const inFlightSeconds = seconds("ROTATION_IN_FLIGHT_SECONDS", 60, 1);
     const secret = await getSecret(secretName);

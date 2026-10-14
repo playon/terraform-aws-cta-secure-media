@@ -208,7 +208,7 @@ test('stages both edge keys atomically, waits, promotes, expires and physically 
   const promoted = await action('promote');
   expect(previous().expiresAt).toBeNull();
   expect(mintVersion()[1].value).toEqual({ algorithm: 'HMAC-SHA256', signingKey: nextKey, preserved: 'metadata' });
-  expect(promoted.cleanupAt).toBe(prepared.propagationReadyAt + 86400 + 60 + 60);
+  expect(promoted.cleanupAt).toBe(prepared.propagationReadyAt + 7200 + 60 + 60);
   expect(promoted.cleanupTimestamp).toBe(new Date(promoted.cleanupAt * 1000).toISOString());
   const finished = await action('finalize');
   expect(previous().expiresAt).toBe(finished.cleanupAt);
@@ -332,7 +332,7 @@ test('a failed secret write keeps old mint key accepted indefinitely, and retry 
   await action('promote');
   expect(state().nextSigningKey).toBe(saved.nextSigningKey);
   expect(state().nextVersionId).toBe(saved.nextVersionId);
-  expect(state().cleanupAt).toBe(clock / 1000 + 86520);
+  expect(state().cleanupAt).toBe(clock / 1000 + saved.overlapSeconds + 60 + saved.inFlightSeconds);
 });
 
 test('failure after writing pending secret does not switch mint and retries the same deterministic version', async () => {
@@ -389,7 +389,7 @@ test('failure persisting confirmed promotion leaves no edge expiry and uses late
   expect(previous().expiresAt).toBeNull();
   clock += 3600000;
   const promoted = await action('promote');
-  expect(promoted.cleanupAt).toBe(clock / 1000 + 86520);
+  expect(promoted.cleanupAt).toBe(clock / 1000 + state().overlapSeconds + 60 + state().inFlightSeconds);
   const secretWrites = mockSmSend.mock.calls.filter(([command]) => command.type === 'PutSecret');
   expect(secretWrites).toHaveLength(1);
 });
@@ -568,11 +568,11 @@ test('initial sync creates the current edge key atomically and delete is a no-op
 });
 
 test.each([
-  ['ROTATION_OVERLAP_SECONDS', '86399'],
+  ['ROTATION_OVERLAP_SECONDS', '7199'],
   ['ROTATION_PROPAGATION_SECONDS', '299'],
   ['ROTATION_IN_FLIGHT_SECONDS', '0'],
   ['ROTATION_OVERLAP_SECONDS', 'NaN'],
-  ['ROTATION_OVERLAP_SECONDS', '86400.5'],
+  ['ROTATION_OVERLAP_SECONDS', '7200.5'],
 ])('rejects unsafe %s=%s before any staging', async (name, value) => {
   process.env[name] = value;
   await expect(action('prepare')).rejects.toMatchObject({ name: 'InvalidRotationConfiguration' });
@@ -585,7 +585,7 @@ test('captures configured overlap and margin once, unaffected by later environme
   process.env.ROTATION_IN_FLIGHT_SECONDS = '120';
   const prepared = await stage();
   expect(prepared.propagationReadyAt).toBe(1700000600);
-  process.env.ROTATION_OVERLAP_SECONDS = '86400';
+  process.env.ROTATION_OVERLAP_SECONDS = '7200';
   process.env.ROTATION_IN_FLIGHT_SECONDS = '1';
   const promoted = await action('promote');
   expect(promoted.cleanupAt).toBe(prepared.propagationReadyAt + 172800 + 60 + 120);

@@ -72,12 +72,12 @@ variable "rotation_enabled" {
 
 variable "rotation_overlap_seconds" {
   type        = number
-  description = "Previous-key overlap after mint promotion; at least the maximum supported token TTL (86400 seconds). Cache and in-flight margins are added automatically."
-  default     = 86400
+  description = "Previous-key overlap after mint promotion; at least the maximum supported token TTL (7200 seconds). Cache and in-flight margins are added automatically."
+  default     = 7200
   nullable    = false
   validation {
-    condition     = var.rotation_overlap_seconds >= 86400 && floor(var.rotation_overlap_seconds) == var.rotation_overlap_seconds
-    error_message = "Rotation overlap must be an integer of at least 86400 seconds."
+    condition     = var.rotation_overlap_seconds >= 7200 && floor(var.rotation_overlap_seconds) == var.rotation_overlap_seconds
+    error_message = "Rotation overlap must be an integer of at least 7200 seconds."
   }
 }
 
