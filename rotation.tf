@@ -27,6 +27,8 @@ data "aws_iam_policy_document" "sync_keys_secret" {
       "secretsmanager:GetSecretValue",
       "secretsmanager:PutSecretValue",
       "secretsmanager:UpdateSecret",
+      "secretsmanager:DescribeSecret",
+      "secretsmanager:UpdateSecretVersionStage",
     ]
     resources = [aws_secretsmanager_secret.signing_key.arn]
   }
@@ -41,7 +43,18 @@ resource "aws_iam_role_policy" "sync_keys_secret" {
 resource "aws_iam_role_policy" "sync_keys_kvs" {
   name   = "kvs-write"
   role   = aws_iam_role.sync_keys.id
-  policy = data.aws_iam_policy_document.kvs_write.json
+  policy = data.aws_iam_policy_document.rotation_kvs.json
+}
+
+data "aws_iam_policy_document" "rotation_kvs" {
+  statement {
+    actions = [
+      "cloudfront-keyvaluestore:DescribeKeyValueStore",
+      "cloudfront-keyvaluestore:GetKey",
+      "cloudfront-keyvaluestore:UpdateKeys",
+    ]
+    resources = [aws_cloudfront_key_value_store.this.arn]
+  }
 }
 
 resource "aws_lambda_function" "sync_keys" {
@@ -55,8 +68,10 @@ resource "aws_lambda_function" "sync_keys" {
 
   environment {
     variables = {
-      SECRET_NAME = aws_secretsmanager_secret.signing_key.arn
-      KVS_ARN     = aws_cloudfront_key_value_store.this.arn
+      SECRET_NAME                  = aws_secretsmanager_secret.signing_key.arn
+      KVS_ARN                      = aws_cloudfront_key_value_store.this.arn
+      ROTATION_OVERLAP_SECONDS     = tostring(var.rotation_overlap_seconds)
+      ROTATION_PROPAGATION_SECONDS = tostring(var.rotation_propagation_seconds)
     }
   }
 }
@@ -116,28 +131,61 @@ resource "aws_sfn_state_machine" "rotation" {
   role_arn = aws_iam_role.rotation_sfn.arn
 
   definition = jsonencode({
-    StartAt = "RotateSigningKey"
+    StartAt = "PrepareSigningKey"
     States = {
-      RotateSigningKey = {
+      PrepareSigningKey = {
+        Type       = "Task"
+        Resource   = "arn:aws:states:::lambda:invoke"
+        Next       = "WaitForEdgePropagation"
+        ResultPath = "$.rotation"
+        Parameters = {
+          FunctionName = aws_lambda_function.sync_keys.arn
+          Payload      = { action = "prepare", "executionId.$" = "$$.Execution.Id" }
+        }
+        Retry = [{ ErrorEquals = ["States.TaskFailed"], IntervalSeconds = 2, MaxAttempts = 6, BackoffRate = 2 }]
+      }
+      WaitForEdgePropagation = {
+        Type          = "Wait"
+        TimestampPath = "$.rotation.Payload.propagationReadyTimestamp"
+        Next          = "PromoteMintKey"
+      }
+      PromoteMintKey = {
+        Type       = "Task"
+        Resource   = "arn:aws:states:::lambda:invoke"
+        Next       = "FinalizeOverlap"
+        ResultPath = "$.rotation"
+        Parameters = {
+          FunctionName = aws_lambda_function.sync_keys.arn
+          Payload      = { action = "promote", "executionId.$" = "$$.Execution.Id" }
+        }
+        Retry = [{ ErrorEquals = ["States.TaskFailed"], IntervalSeconds = 2, MaxAttempts = 6, BackoffRate = 2 }]
+      }
+      FinalizeOverlap = {
+        Type       = "Task"
+        Resource   = "arn:aws:states:::lambda:invoke"
+        Next       = "WaitForOverlap"
+        ResultPath = "$.rotation"
+        Parameters = {
+          FunctionName = aws_lambda_function.sync_keys.arn
+          Payload      = { action = "finalize", "executionId.$" = "$$.Execution.Id" }
+        }
+        Retry = [{ ErrorEquals = ["States.TaskFailed"], IntervalSeconds = 2, MaxAttempts = 6, BackoffRate = 2 }]
+      }
+      WaitForOverlap = {
+        Type          = "Wait"
+        TimestampPath = "$.rotation.Payload.cleanupTimestamp"
+        Next          = "RemovePreviousKey"
+      }
+      RemovePreviousKey = {
         Type       = "Task"
         Resource   = "arn:aws:states:::lambda:invoke"
         End        = true
         ResultPath = null
         Parameters = {
           FunctionName = aws_lambda_function.sync_keys.arn
-          Payload      = { rotate = true }
+          Payload      = { action = "cleanup", "executionId.$" = "$$.Execution.Id" }
         }
-        Retry = [{
-          ErrorEquals = [
-            "Lambda.ClientExecutionTimeoutException",
-            "Lambda.ServiceException",
-            "Lambda.AWSLambdaException",
-            "Lambda.SdkClientException",
-          ]
-          IntervalSeconds = 2
-          MaxAttempts     = 6
-          BackoffRate     = 2
-        }]
+        Retry = [{ ErrorEquals = ["States.TaskFailed"], IntervalSeconds = 2, MaxAttempts = 6, BackoffRate = 2 }]
       }
     }
   })
@@ -177,6 +225,7 @@ resource "aws_cloudwatch_event_rule" "rotation_schedule" {
   name                = "${local.name_prefix}-${local.environment}-key-rotation"
   description         = "Trigger CTA signing key rotation on a schedule."
   schedule_expression = var.rotation_schedule
+  state               = var.rotation_enabled ? "ENABLED" : "DISABLED"
 }
 
 resource "aws_cloudwatch_event_target" "rotation_target" {

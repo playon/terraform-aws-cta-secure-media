@@ -203,7 +203,18 @@ async function handler(event) {
             request.uri = segments.join('/') || '/';
         }
 
-        var cwt = cf.cwt.validateToken(Buffer.from(token, 'base64url'), { key: signingKey });
+        var tokenBytes = Buffer.from(token, 'base64url');
+        var cwt;
+        try {
+            cwt = cf.cwt.validateToken(tokenBytes, { key: signingKey });
+        } catch (currentError) {
+            var previous;
+            try { previous = JSON.parse(await kvs.get("key:previous")); } catch (e) { throw currentError; }
+            if (!previous || typeof previous.signingKey !== "string" || !previous.signingKey ||
+                (previous.expiresAt !== null && (!Number.isFinite(previous.expiresAt) ||
+                 previous.expiresAt <= Date.now() / 1000))) throw currentError;
+            cwt = cf.cwt.validateToken(tokenBytes, { key: previous.signingKey });
+        }
         payload = cwt.payload;
 
         // 410 Gone (revoked) is distinct from generic 401 so clients

@@ -11,8 +11,10 @@ describe('parseTTL', () => {
   test('parses hours', () => expect(parseTTL('2h')).toBe(7200));
   test('parses days', () => expect(parseTTL('1d')).toBe(86400));
   test('passes through numbers', () => expect(parseTTL(3600)).toBe(3600));
-  test('defaults invalid input', () => expect(parseTTL('bad')).toBe(7200));
-  test('defaults empty string', () => expect(parseTTL('')).toBe(7200));
+  test.each(['bad', '', 0, -1, 1.5, NaN, Infinity, null, false, '0s', '25h', '2d', 86401])('rejects invalid or unsupported TTL %p', ttl => {
+    expect(() => parseTTL(ttl)).toThrow('TTL must be');
+  });
+  test('accepts the maximum numeric TTL', () => expect(parseTTL(86400)).toBe(86400));
 });
 
 describe('generateToken', () => {
