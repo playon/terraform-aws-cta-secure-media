@@ -24,6 +24,8 @@ const kvs = new CloudFrontKeyValueStoreClient({});
 const STATE_KEY = "key:rotation";
 const MAX_CAS_ATTEMPTS = 8;
 const CACHE_SECONDS = 60;
+const MAX_ROTATION_SECONDS = 31449600; // 364 days; reserve one day for tasks and retries.
+const MAX_VALUE_BYTES = 1024;
 const now = () => Math.ceil(Date.now() / 1000);
 
 function failure(name, message) {
@@ -124,6 +126,32 @@ function requireStagedKeys(view, state, expiresAt) {
     }
 }
 
+function isLegacyPrevious(view) {
+    // Legacy keys are raw hex rotation output or configurable-length
+    // Terraform random_password output (special=false). Never migrate a
+    // previous value while any rotation-state record exists.
+    return view.state === undefined && typeof view.previous === "string"
+        && /^[A-Za-z0-9]+$/.test(view.previous);
+}
+
+function requireStateCapacity(state) {
+    // Later phases retain every preparation field and add these timestamps.
+    // Reserve the widest safe-integer timestamps, not merely today's width,
+    // so delayed recovery cannot outgrow a value that was safe when staged.
+    const maximumState = {
+        ...state,
+        phase: "finalized",
+        propagationReadyAt: Number.MAX_SAFE_INTEGER,
+        proposedCleanupAt: Number.MAX_SAFE_INTEGER,
+        promotionConfirmedAt: Number.MAX_SAFE_INTEGER,
+        cleanupAt: Number.MAX_SAFE_INTEGER,
+    };
+    const maximumPrevious = { signingKey: state.previousSigningKey, expiresAt: Number.MAX_SAFE_INTEGER };
+    if ([maximumState, maximumPrevious].some(value => Buffer.byteLength(JSON.stringify(value), "utf8") > MAX_VALUE_BYTES)) {
+        throw failure("RotationStateTooLarge", "Rotation state and retained key must fit the 1024-byte KVS value limit in every phase");
+    }
+}
+
 async function initialize(secretName, kvsArn, event) {
     const response = {
         PhysicalResourceId: event.PhysicalResourceId || "key-sync",
@@ -135,12 +163,16 @@ async function initialize(secretName, kvsArn, event) {
         // Never let a deploy reset staged/promoted edge keys or their ownership.
         if (view.state && view.state.phase !== "complete") return response;
         const secret = await getSecret(secretName);
-        if (view.current === secret.value.signingKey) return response;
-        if (view.previous !== undefined) {
+        const legacyPrevious = isLegacyPrevious(view);
+        if (legacyPrevious && view.current && view.current !== secret.value.signingKey) {
+            throw failure("RotationKeyConflict", "Legacy migration requires matching current mint and edge signing keys");
+        }
+        if (view.previous !== undefined && !legacyPrevious) {
             throw failure("RotationKeyConflict", "Initial sync cannot overwrite a retained previous key");
         }
+        if (view.current === secret.value.signingKey && !legacyPrevious) return response;
         try {
-            await update(kvsArn, view, { "key:default": secret.value.signingKey });
+            await update(kvsArn, view, { "key:default": secret.value.signingKey }, legacyPrevious ? ["key:previous"] : []);
             return response;
         } catch (error) {
             if (error.name !== "ConflictException") throw error;
@@ -157,12 +189,15 @@ async function prepare(secretName, kvsArn, view, executionId) {
         if (view.state.phase === "preparing") return confirmPrepared(kvsArn, executionId);
         return result(view.state, executionId);
     }
-    if (view.previous !== undefined) {
+    if (view.previous !== undefined && !isLegacyPrevious(view)) {
         throw failure("RotationKeyConflict", "A previous signing key is still retained");
     }
     const overlapSeconds = seconds("ROTATION_OVERLAP_SECONDS", 7200, 7200);
     const propagationSeconds = seconds("ROTATION_PROPAGATION_SECONDS", 300, 300);
     const inFlightSeconds = seconds("ROTATION_IN_FLIGHT_SECONDS", 60, 1);
+    if (propagationSeconds + overlapSeconds + CACHE_SECONDS + inFlightSeconds > MAX_ROTATION_SECONDS) {
+        throw failure("InvalidRotationConfiguration", "Propagation, overlap, cache and in-flight durations must total at most 31449600 seconds (364 days)");
+    }
     const secret = await getSecret(secretName);
     if (view.current !== secret.value.signingKey) {
         throw failure("RotationKeyConflict", "Current mint and edge signing keys differ");
@@ -178,6 +213,7 @@ async function prepare(secretName, kvsArn, view, executionId) {
         overlapSeconds,
         inFlightSeconds,
     };
+    requireStateCapacity(state);
     // A single atomic write retains the mint's old key before exposing the new one.
     await update(kvsArn, view, {
         [STATE_KEY]: JSON.stringify(state),

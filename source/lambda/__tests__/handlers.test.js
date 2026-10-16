@@ -150,6 +150,12 @@ describe('CTA mint rotation boundaries', () => {
     expect(result.statusCode).toBe(200);
     expect(JSON.parse(result.body).expiresAt).toBe(1700000000 + seconds);
   });
+  test.each([['3600.0', 3600], ['1e3', 1000]])('accepts JSON numeric TTL %s', async (literal, seconds) => {
+    mockSend.mockResolvedValueOnce({ SecretString: JSON.stringify({ signingKey: 'key' }) });
+    const result = await handler({ body: `{"policy":{"ttl":${literal}},"mediaUrl":"https://cdn.example.com/video/live.m3u8"}` });
+    expect(result.statusCode).toBe(200);
+    expect(JSON.parse(result.body).expiresAt).toBe(1700000000 + seconds);
+  });
 });
 
 // --- Token Revocation ---

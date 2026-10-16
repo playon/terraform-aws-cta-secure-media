@@ -72,7 +72,7 @@ variable "rotation_enabled" {
 
 variable "rotation_overlap_seconds" {
   type        = number
-  description = "Previous-key overlap after mint promotion; at least the maximum supported token TTL (7200 seconds). Cache and in-flight margins are added automatically."
+  description = "Previous-key overlap after mint promotion; at least the maximum supported token TTL (7200 seconds). Propagation + overlap + automatic 60-second cache and 60-second in-flight margins must fit within 364 days."
   default     = 7200
   nullable    = false
   validation {
@@ -83,7 +83,7 @@ variable "rotation_overlap_seconds" {
 
 variable "rotation_propagation_seconds" {
   type        = number
-  description = "Edge propagation wait before mint promotion. Verify this bound in each deployment before permitting rotation."
+  description = "Edge propagation wait before mint promotion. Verify this bound in each deployment before permitting rotation; the combined rotation duration is limited to 364 days."
   default     = 300
   nullable    = false
   validation {

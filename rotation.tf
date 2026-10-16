@@ -66,6 +66,13 @@ resource "aws_lambda_function" "sync_keys" {
   source_code_hash = data.archive_file.lambda_sync_keys.output_base64sha256
   timeout          = 30
 
+  lifecycle {
+    precondition {
+      condition     = var.rotation_propagation_seconds + var.rotation_overlap_seconds + 60 + 60 <= 31449600
+      error_message = "Rotation propagation + overlap + 60s mint cache + 60s in-flight allowance must not exceed 31449600 seconds (364 days), reserving one day of the Standard workflow's one-year limit for tasks and retries."
+    }
+  }
+
   environment {
     variables = {
       SECRET_NAME                  = aws_secretsmanager_secret.signing_key.arn
@@ -82,7 +89,7 @@ resource "aws_lambda_function" "sync_keys" {
 # to force invocation on each deploy. TF equivalent: aws_lambda_invocation
 # with a CFN-shaped event so the Lambda's existing RequestType branch
 # fires without needing a code change (see source/lambda/sync_keys/index.js
-# — it checks event.RequestType for the CDK path, event.rotate for the
+# — it checks event.RequestType for initialization, event.action for the
 # SFN path). Rerun is keyed on the secret version so a rotation-driven
 # secret change triggers a resync on the next apply.
 resource "aws_lambda_invocation" "initial_key_sync" {

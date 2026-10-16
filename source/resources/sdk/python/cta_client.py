@@ -121,9 +121,9 @@ def parse_ttl(ttl) -> int:
     if isinstance(ttl, str):
         match = re.fullmatch(r'([0-9]+)([smhd])', ttl)
         seconds = int(match.group(1)) * {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}[match.group(2)] if match else None
-    if type(seconds) is not int or seconds <= 0 or seconds > 7200:
+    if type(seconds) not in (int, float) or not 0 < seconds <= 7200 or int(seconds) != seconds:
         raise ValueError('TTL must be a positive integer duration of at most 7200 seconds')
-    return seconds
+    return int(seconds)
 
 
 class CTAClient:

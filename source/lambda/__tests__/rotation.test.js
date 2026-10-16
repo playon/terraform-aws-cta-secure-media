@@ -178,6 +178,12 @@ beforeEach(() => {
       const old = versions.get(command.RemoveFromVersionId);
       if (!old?.stages.includes(command.VersionStage)) throw error('InvalidRequestException');
       old.stages = old.stages.filter(label => label !== command.VersionStage);
+      if (command.VersionStage === 'AWSCURRENT' && command.MoveToVersionId) {
+        for (const version of versions.values()) {
+          version.stages = version.stages.filter(label => label !== 'AWSPREVIOUS');
+        }
+        old.stages.push('AWSPREVIOUS');
+      }
       if (command.MoveToVersionId) versions.get(command.MoveToVersionId).stages.push(command.VersionStage);
       mutations.push('UpdateStage');
       assertMintAccepted();
@@ -208,6 +214,8 @@ test('stages both edge keys atomically, waits, promotes, expires and physically 
   const promoted = await action('promote');
   expect(previous().expiresAt).toBeNull();
   expect(mintVersion()[1].value).toEqual({ algorithm: 'HMAC-SHA256', signingKey: nextKey, preserved: 'metadata' });
+  expect(versions.get(ORIGINAL_VERSION).stages).toEqual(['AWSPREVIOUS']);
+  expect(mintVersion()[1].stages).toEqual(expect.arrayContaining(['AWSCURRENT', 'AWSPENDING']));
   expect(promoted.cleanupAt).toBe(prepared.propagationReadyAt + 7200 + 60 + 60);
   expect(promoted.cleanupTimestamp).toBe(new Date(promoted.cleanupAt * 1000).toISOString());
   const finished = await action('finalize');
@@ -219,6 +227,7 @@ test('stages both edge keys atomically, waits, promotes, expires and physically 
   expect(state()).toEqual({ executionId: EXECUTION, phase: 'complete',
     propagationReadyAt: prepared.propagationReadyAt, cleanupAt: finished.cleanupAt });
   expect(versions.get(mintVersion()[0]).stages).not.toContain('AWSPENDING');
+  expect(versions.get(ORIGINAL_VERSION).stages).toEqual(['AWSPREVIOUS']);
   expect(mutations.slice(0, 5)).toEqual(['UpdateKeys', 'UpdateKeys', 'UpdateKeys', 'PutSecret', 'UpdateStage']);
 });
 
@@ -567,16 +576,133 @@ test('initial sync creates the current edge key atomically and delete is a no-op
   expect(mockKvsSend.mock.calls).toHaveLength(calls);
 });
 
+test.each(['a'.repeat(64), 'A'.repeat(64), 'G7'.repeat(32), 'G7'.repeat(16)])('initial sync deletes raw legacy previous %s without changing the agreeing current key', async legacyPrevious => {
+  keys.set('key:previous', legacyPrevious);
+  expect((await handler({ RequestType: 'Update' })).Status).toBe('SUCCESS');
+  expect([...keys]).toEqual([['key:default', OLD_KEY]]);
+  const writes = mockKvsSend.mock.calls.map(([command]) => command).filter(command => command.type === 'UpdateKeys');
+  expect(writes).toHaveLength(1);
+  expect(writes[0]).toMatchObject({
+    IfMatch: '0',
+    Puts: [{ Key: 'key:default', Value: OLD_KEY }],
+    Deletes: [{ Key: 'key:previous' }],
+  });
+});
+
+test.each(['a'.repeat(64), 'A'.repeat(64), 'G7'.repeat(32), 'G7'.repeat(16)])('prepare atomically replaces raw legacy previous %s while staging and owning both keys', async legacyPrevious => {
+  keys.set('key:previous', legacyPrevious);
+  const prepared = await action('prepare');
+  expect(prepared.phase).toBe('staged');
+  expect(previous()).toEqual({ signingKey: OLD_KEY, expiresAt: null });
+  expect(state().executionId).toBe(EXECUTION);
+  const firstWrite = mockKvsSend.mock.calls.map(([command]) => command).find(command => command.type === 'UpdateKeys');
+  expect(firstWrite.IfMatch).toBe('0');
+  expect(firstWrite.Puts.map(put => put.Key)).toEqual(['key:rotation', 'key:default', 'key:previous']);
+  expect(firstWrite.Deletes).toBeUndefined();
+  expect(mintVersion()[1].value.signingKey).toBe(OLD_KEY);
+});
+
+test.each(['initialize', 'prepare'])('%s legacy migration fails closed when nonempty edge and mint current keys differ', async operation => {
+  keys.set('key:default', 'outdated-edge-key');
+  keys.set('key:previous', 'G7'.repeat(32));
+  const saved = [...keys];
+  const pending = operation === 'initialize' ? handler({ RequestType: 'Update' }) : action('prepare');
+  await expect(pending).rejects.toMatchObject({ name: 'RotationKeyConflict' });
+  expect([...keys]).toEqual(saved);
+  expect(mutations).toEqual([]);
+});
+
+test.each([
+  JSON.stringify({ signingKey: OLD_KEY, expiresAt: null }),
+  JSON.stringify({ signingKey: OLD_KEY, expiresAt: 1700007200 }),
+  JSON.stringify({ signingKey: OLD_KEY, expiresAt: 0 }),
+  'unknown-previous', '', 'with_underscore', 'with whitespace', JSON.stringify(OLD_KEY), '{}',
+  '["unrecognized"]', '{malformed',
+])('never migrates structured or unrecognized previous value %s', async retained => {
+  keys.set('key:previous', retained);
+  const saved = [...keys];
+  await expect(handler({ RequestType: 'Update' })).rejects.toMatchObject({ name: 'RotationKeyConflict' });
+  await expect(action('prepare')).rejects.toMatchObject({ name: 'RotationKeyConflict' });
+  expect([...keys]).toEqual(saved);
+  expect(mutations).toEqual([]);
+});
+
+test.each(['staged', 'complete'])('raw previous never bypasses existing %s ownership', async phase => {
+  keys.set('key:rotation', JSON.stringify({ executionId: 'original-owner', phase }));
+  keys.set('key:previous', 'a'.repeat(64));
+  const saved = [...keys];
+  if (phase === 'staged') {
+    expect((await handler({ RequestType: 'Update' })).Status).toBe('SUCCESS');
+    await expect(action('prepare')).rejects.toMatchObject({ name: 'RotationInProgress' });
+  } else {
+    await expect(handler({ RequestType: 'Update' })).rejects.toMatchObject({ name: 'RotationKeyConflict' });
+    await expect(action('prepare')).rejects.toMatchObject({ name: 'RotationKeyConflict' });
+  }
+  expect([...keys]).toEqual(saved);
+  expect(mutations).toEqual([]);
+});
+
+test.each(['initialize', 'prepare'])('%s legacy migration cannot overwrite a concurrently retained structured key', async operation => {
+  keys.set('key:previous', 'a'.repeat(64));
+  const retained = JSON.stringify({ signingKey: OLD_KEY, expiresAt: null });
+  beforeKvs = command => {
+    if (command.type === 'UpdateKeys') {
+      beforeKvs = undefined;
+      keys.set('key:previous', retained);
+      revision++;
+    }
+  };
+  const pending = operation === 'initialize' ? handler({ RequestType: 'Update' }) : action('prepare');
+  await expect(pending).rejects.toMatchObject({ name: 'RotationKeyConflict' });
+  expect(keys.get('key:default')).toBe(OLD_KEY);
+  expect(keys.get('key:previous')).toBe(retained);
+  expect(keys.has('key:rotation')).toBe(false);
+  expect(mutations).toEqual([]);
+});
+
+test.each([
+  ['ROTATION_OVERLAP_SECONDS', 31449180],
+  ['ROTATION_PROPAGATION_SECONDS', 31442280],
+  ['ROTATION_IN_FLIGHT_SECONDS', 31442040],
+])('accepts exact 364-day total with %s=%s', async (name, value) => {
+  process.env[name] = String(value);
+  const startedAt = clock / 1000;
+  await stage();
+  const promoted = await action('promote');
+  expect(promoted.cleanupAt - startedAt).toBe(31449600);
+  const finished = await action('finalize');
+  clock = finished.cleanupAt * 1000;
+  expect((await action('cleanup')).phase).toBe('complete');
+});
+
+test.each([
+  ['ROTATION_OVERLAP_SECONDS', 31449181],
+  ['ROTATION_PROPAGATION_SECONDS', 31442281],
+  ['ROTATION_IN_FLIGHT_SECONDS', 31442041],
+])('rejects 364-day total plus one second with %s=%s before any mutation', async (name, value) => {
+  process.env[name] = String(value);
+  await expect(action('prepare')).rejects.toMatchObject({ name: 'InvalidRotationConfiguration' });
+  expect([...keys]).toEqual([['key:default', OLD_KEY]]);
+  expect(mutations).toEqual([]);
+  expect(mockSmSend).not.toHaveBeenCalled();
+});
+
 test.each([
   ['ROTATION_OVERLAP_SECONDS', '7199'],
   ['ROTATION_PROPAGATION_SECONDS', '299'],
   ['ROTATION_IN_FLIGHT_SECONDS', '0'],
   ['ROTATION_OVERLAP_SECONDS', 'NaN'],
   ['ROTATION_OVERLAP_SECONDS', '7200.5'],
+  ['ROTATION_PROPAGATION_SECONDS', '300.5'],
+  ['ROTATION_IN_FLIGHT_SECONDS', '1.5'],
+  ['ROTATION_OVERLAP_SECONDS', 'Infinity'],
+  ['ROTATION_PROPAGATION_SECONDS', '9007199254740992'],
+  ['ROTATION_IN_FLIGHT_SECONDS', 'true'],
 ])('rejects unsafe %s=%s before any staging', async (name, value) => {
   process.env[name] = value;
   await expect(action('prepare')).rejects.toMatchObject({ name: 'InvalidRotationConfiguration' });
   expect(keys.has('key:rotation')).toBe(false);
+  expect(mutations).toEqual([]);
 });
 
 test('captures configured overlap and margin once, unaffected by later environment changes', async () => {
@@ -599,8 +725,61 @@ test('full-length execution IDs and secret version IDs fit the KVS 1024-byte val
   const prepared = await action('prepare', executionId);
   clock = prepared.propagationReadyAt * 1000;
   await action('promote', executionId);
-  await action('finalize', executionId);
+  const finished = await action('finalize', executionId);
   expect(Buffer.byteLength(keys.get('key:rotation'))).toBeLessThanOrEqual(1024);
+  expect(state().executionId).toBe(executionId);
+  clock = finished.cleanupAt * 1000;
+  expect((await action('cleanup', executionId)).executionId).toBe(executionId);
+  expect(state().executionId).toBe(executionId);
+});
+
+test.each(['é'.repeat(256), '界'.repeat(256), '\u0000'.repeat(256)])('rejects execution IDs whose UTF-8 or JSON bytes exceed the all-phase state limit', async executionId => {
+  expect(executionId).toHaveLength(256);
+  await expect(action('prepare', executionId)).rejects.toMatchObject({ name: 'RotationStateTooLarge' });
+  expect([...keys]).toEqual([['key:default', OLD_KEY]]);
+  expect(mutations).toEqual([]);
+  expect(mockSmSend.mock.calls.every(([command]) => command.type === 'GetSecret')).toBe(true);
+});
+
+test('rejects long signing keys before staging even when the preparation state alone fits', async () => {
+  const executionId = 'x'.repeat(256);
+  const signingKey = 'k'.repeat(300);
+  const original = versions.get(ORIGINAL_VERSION);
+  original.value.signingKey = signingKey;
+  versions.clear();
+  versions.set('0'.repeat(64), original);
+  keys.set('key:default', signingKey);
+  const preparing = {
+    executionId, phase: 'preparing', previousSigningKey: signingKey, nextSigningKey: 'a'.repeat(64),
+    previousVersionId: '0'.repeat(64), nextVersionId: 'b'.repeat(64),
+    propagationSeconds: 300, overlapSeconds: 7200, inFlightSeconds: 60,
+  };
+  expect(Buffer.byteLength(JSON.stringify(preparing), 'utf8')).toBeLessThanOrEqual(1024);
+  await expect(action('prepare', executionId)).rejects.toMatchObject({ name: 'RotationStateTooLarge' });
+  expect([...keys]).toEqual([['key:default', signingKey]]);
+  expect(mutations).toEqual([]);
+  expect(mintVersion()[0]).toBe('0'.repeat(64));
+  expect(mockSmSend.mock.calls.every(([command]) => command.type === 'GetSecret')).toBe(true);
+});
+
+test('a later promotion moves AWSPREVIOUS automatically without changing edge cleanup semantics', async () => {
+  const first = await finalized();
+  const firstVersion = mintVersion()[0];
+  clock = first.cleanupAt * 1000;
+  await action('cleanup');
+  const prepared = await action('prepare', 'execution-2');
+  clock = prepared.propagationReadyAt * 1000;
+  await action('promote', 'execution-2');
+  expect(versions.get(ORIGINAL_VERSION).stages).not.toContain('AWSPREVIOUS');
+  expect(versions.get(firstVersion).stages).toEqual(['AWSPREVIOUS']);
+  expect(mintVersion()[1].stages).toEqual(expect.arrayContaining(['AWSCURRENT', 'AWSPENDING']));
+  expect(previous()).toEqual({ signingKey: versions.get(firstVersion).value.signingKey, expiresAt: null });
+  const finished = await action('finalize', 'execution-2');
+  clock = finished.cleanupAt * 1000;
+  await action('cleanup', 'execution-2');
+  expect(keys.has('key:previous')).toBe(false);
+  expect(versions.get(firstVersion).stages).toEqual(['AWSPREVIOUS']);
+  expect(mintVersion()[1].stages).toEqual(['AWSCURRENT']);
 });
 
 test('fails closed when edge keys or current secret disagree with rotation ownership', async () => {
