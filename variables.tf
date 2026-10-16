@@ -63,6 +63,35 @@ variable "rotation_schedule" {
   nullable    = false
 }
 
+variable "rotation_enabled" {
+  type        = bool
+  description = "Enable scheduled rotation only after validator, mint, propagation, and cleanup verification. Manual executions require the same deployment gate."
+  default     = false
+  nullable    = false
+}
+
+variable "rotation_overlap_seconds" {
+  type        = number
+  description = "Previous-key overlap after mint promotion; at least the maximum supported token TTL (7200 seconds). Propagation + overlap + automatic 60-second cache and 60-second in-flight margins must fit within 364 days."
+  default     = 7200
+  nullable    = false
+  validation {
+    condition     = var.rotation_overlap_seconds >= 7200 && floor(var.rotation_overlap_seconds) == var.rotation_overlap_seconds
+    error_message = "Rotation overlap must be an integer of at least 7200 seconds."
+  }
+}
+
+variable "rotation_propagation_seconds" {
+  type        = number
+  description = "Edge propagation wait before mint promotion. Verify this bound in each deployment before permitting rotation; the combined rotation duration is limited to 364 days."
+  default     = 300
+  nullable    = false
+  validation {
+    condition     = var.rotation_propagation_seconds >= 300 && floor(var.rotation_propagation_seconds) == var.rotation_propagation_seconds
+    error_message = "Rotation propagation wait must be an integer of at least 300 seconds."
+  }
+}
+
 variable "demo_origin_domain" {
   type        = string
   description = "Default-behavior origin domain. Stage default matches the CDK reference solution's demo playback host. Override in prod tfvars to point at real content origin."

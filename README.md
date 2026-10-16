@@ -99,6 +99,9 @@ The two viewer-* headers this module needs don't just have to be forwarded to th
 | `signing_key_length` | HMAC signing key length in bytes. | `number` | `64` |
 | `secret_recovery_window_days` | Secrets Manager recovery window (in days) for the signing-key secret. `0` = immediate destroy (fine for throwaway envs); `7-30` keeps the secret recoverable for that window after `terraform destroy`. | `number` | `30` |
 | `rotation_schedule` | EventBridge schedule for the rotation Step Function. | `string` | `"rate(30 days)"` |
+| `rotation_enabled` | Opt in only after the coordinated deployment/rotation gate passes. | `bool` | `false` |
+| `rotation_overlap_seconds` | Previous-key overlap after promotion, minimum 7200; cache/in-flight margins added automatically. Increase to cover legacy token lifetimes when needed. | `number` | `7200` |
+| `rotation_propagation_seconds` | Verified edge propagation allowance before mint promotion, minimum 300. | `number` | `300` |
 | `demo_origin_domain` | Default-behavior origin. Override to point at a real content origin. | `string` | `"cdn.mediaplaypen.com"` |
 | `demo_bucket_force_destroy` | When true, `terraform destroy` empties + removes the demo S3 bucket even if it still holds objects. Set true for throwaway envs; false in prod so an accidental destroy fails loudly. | `bool` | `false` |
 | `token_enforcement_mode` | Token gate: `off` skips check entirely; `log` computes but forwards + emits log line; `enforce` rejects with 401. Recommended rollout: `off` → `log` → `enforce`. | `string` | `"enforce"` |
@@ -124,6 +127,56 @@ The two viewer-* headers this module needs don't just have to be forwarded to th
 | `rotation_workflow_name` | Step Functions state machine name for signing-key rotation |
 | `demo_website_url` | Demo website URL (only meaningful when the demo bucket is populated) |
 
+## Key Rotation
+
+Scheduled rotation is **disabled by default**. Do not manually start rotation until the updated validators and mints are deployed together and the deployment checks below pass.
+
+The Step Functions workflow uses one stable execution ARN as its rotation ID:
+
+1. **Prepare:** atomically publish the new raw signing key at `key:default`, the old key at `key:previous` as `{"signingKey":"…","expiresAt":null}`, and ownership state at `key:rotation`. The mint still reads the old Secrets Manager `AWSCURRENT` version. Both keys validate; normal token expiry, revocation, and policy checks still apply.
+2. **Wait for propagation:** wait at least 300 seconds, measured from confirmation of the atomic KVS update. This is a configured propagation allowance, **not an acknowledgement from every edge location**. Verify the allowance for each deployment before allowing rotation; increase it if needed.
+3. **Promote:** create an idempotent `AWSPENDING` secret version, then move `AWSCURRENT` with the old version as an ownership guard. Confirm the new version before starting the overlap clock.
+4. **Finalize overlap:** set the previous-key expiry to promotion confirmation + configured overlap + 60-second mint-cache allowance + 60-second in-flight allowance. Overlap must be at least 7200 seconds (2 hours). At expiry, validators reject old-key signatures even if physical cleanup is delayed.
+5. **Cleanup:** after the deadline, confirm the mint still uses the new version, remove the pending label, and atomically delete `key:previous` and remove signing material from active rotation state. A key-free completion tombstone prevents old execution retries from affecting later rotations.
+
+Lambda mints refresh their signing key within **60 seconds** of a fetch starting, including fetch latency. A failed refresh refuses to mint with stale cached material. Supported TTLs are positive integer-valued JSON numbers (for example, `3600.0` or `1e3`) or integer `s/m/h` durations, up to **7200 seconds (2 hours)**; only an omitted TTL defaults to `2h`. Booleans, fractional or non-finite numbers, and durations above that maximum, including `1d`, are rejected.
+
+The combined **propagation + overlap + 60-second mint-cache allowance + in-flight allowance** must not exceed **31,449,600 seconds (364 days)**. Terraform uses the default 60-second in-flight allowance; the Lambda also includes any configured `ROTATION_IN_FLIGHT_SECONDS` override in this bound. This reserves one day within the Standard workflow's one-year execution limit for tasks and retries. A resource precondition compatible with Terraform 1.5 rejects an excessive combined duration at plan time; the Lambda also rejects it before staging. The 2-hour maximum/default token TTL and minimum overlap remain unchanged.
+
+### Failure recovery and deployment gate
+
+- Deploy validators and mints before changing rotation behavior. Keep existing EventBridge rotation rules disabled during rollout; applying these changes sets the schedule disabled unless explicitly opted in. Do not invoke the old `{rotate:true}` Lambda interface.
+- **Interim deployment block:** live rotation schedule disables are out-of-band changes against old `main`, not protection encoded in that revision. Do not apply CTA roots sourced from old `main` until the reviewed disabled-default branch is deployed; an old-main apply can re-enable rotation. Keep manual rotation blocked throughout this gate.
+- Inventory legacy/custom issuer TTLs. Previously issued tokens longer than 2 hours must expire before the first rotation, or the configured overlap must cover their maximum remaining lifetime. Longer overlap remains configurable for these legacy tokens. All continuing issuers must comply with the supported TTL/cache bounds.
+- Verify old- and new-key requests through the actual CloudFront distribution, warm mint refresh, original token expiry, revocation/policy checks, and previous-key expiry/deletion. Local cryptographic tests do not prove AWS edge propagation.
+- Consumers attached to an unchanged validator ARN do not need a distribution code/configuration change. Deploy the owning CTA stack, publish the updated LIVE function, and verify through the existing consumer distribution before permitting rotation. If the function ARN changes, update the consumer association only after the replacement validator and mint are ready.
+- Within the 14-day Step Functions redrive window, redrive an eligible failed execution with its **same execution ARN**. After that window, use the direct recovery procedure below. Do not start a second rotation or overwrite KVS/secret state. CAS ownership rejects competing executions. Initial deployment sync skips an active rotation rather than resetting it.
+- Before confirmed promotion, the previous-key deadline stays `null`, so a partial failure cannot expire the key still used by the mint. Resume the execution to finish promotion/finalization. After finalization, an interrupted cleanup does not extend signature acceptance; resume cleanup to physically delete the retained key.
+- Rotation inputs, outputs, and logs contain no signing material. Do not enable SDK wire logging or print KVS/secret contents during troubleshooting.
+
+Terraform controls: `rotation_enabled = false`, `rotation_overlap_seconds = 7200` (minimum 7200), and `rotation_propagation_seconds = 300` by default. The monthly cadence applies only after opt-in.
+
+Terraform removes full-line JavaScript comments from the uploaded validator, retaining readable source while leaving room for configured allowlists within CloudFront's 10 KiB limit.
+
+### Direct recovery after the redrive window
+
+Keep all rotation schedules disabled throughout recovery. First use Step Functions `DescribeExecution` on the **original execution ARN** and confirm its status is terminal (`FAILED`, `TIMED_OUT`, or `ABORTED`), not `RUNNING`. Never restart the workflow with a new execution ARN or change the stored ownership ID.
+
+Invoke the existing SyncKeysToKvs Lambda directly with `InvocationType: RequestResponse`. Each payload must be `{"action":"<action>","executionId":"<original execution ARN>"}`. For **every** invocation, inspect the Invoke response metadata: require `StatusCode: 200` and an absent `FunctionError` before using its returned JSON payload or continuing. HTTP success alone does not establish function success. On an error, stop and diagnose without printing secret/KVS values; retry only the same action and execution ID.
+
+1. Invoke `prepare`; retain its key-free `propagationReadyTimestamp`.
+2. Wait until that absolute UTC timestamp has passed. Do not substitute a new relative timer or shorten the wait because the execution is old.
+3. Invoke `promote`, then invoke `finalize`; retain the latter's key-free `cleanupTimestamp`.
+4. Wait until `cleanupTimestamp` has passed, then invoke `cleanup` and require the key-free result's `phase` to be `complete`.
+
+Repeated actions are idempotent for this original execution ID: already-completed phases retain their recorded deadlines, and completion tombstones prevent a replay from starting another rotation. If recovery is interrupted, repeat this sequence with the same ARN. Lambda action results contain only execution ID, phase, and timestamps, never signing keys. Record only those fields and invocation status; do not enable SDK wire logging or dump Secrets Manager/KVS contents. No new workflow execution, manual KVS edit, or manual secret-stage mutation is part of this procedure. These instructions do not authorize live recovery or rotation before the deployment gate passes.
+
+### Legacy previous-key migration
+
+Only when `key:rotation` is absent, a nonempty ASCII-alphanumeric `key:previous` is recognized as the legacy raw-key format, covering both initial generated passwords and later hexadecimal rotation keys, including configured key lengths. Raw previous records were not consumed by the pre-change validator; migration does not grant them a new acceptance window. Initial deployment sync atomically initializes a missing/empty `key:default` from the current secret key and deletes the raw previous key, or keeps an already-matching default key and atomically deletes the raw previous key. If a nonempty default key differs from the mint's current signing key, initialization fails closed without changing either key. `prepare` likewise requires mint/edge agreement, then atomically replaces the legacy raw previous key with the structured previous record for the currently minted key while staging the new default. Apply the legacy-token lifetime deployment gate before this migration. An existing rotation state protects ownership and retained keys; a structured previous record or unknown/malformed previous value is never silently discarded. Conflicts fail closed and require investigation, not manual deletion of ownership or retained-key state.
+
+
+
 ## Upstream DMA blocklist contract
 
 The `blackout-sync` Lambda expects `<blackout_api_base_url>/v2/broadcasts/dmas` to accept:
@@ -139,7 +192,7 @@ And return an array of `{ key: string, dma_list: number[] | null }` objects. Ada
 - 1× CloudFront KeyValueStore (signing key + revocation list + per-broadcast DMA blocklists)
 - 1× Secrets Manager secret + version (HMAC signing key)
 - 6× Lambda functions (Node token generator, revoker, list-revoked, KVS-cleanup, sync-keys, blackout-sync)
-- 1× Step Functions state machine + EventBridge schedule (30-day key rotation)
+- 1× Step Functions state machine + EventBridge schedule (30-day cadence; rotation disabled by default)
 - 1× EventBridge schedule (hourly KVS revocation cleanup)
 - 1× EventBridge schedule (5-minute DMA blocklist reconcile)
 - 1× CloudFront distribution (demo/reference) + 1× cache policy + 1× OAC

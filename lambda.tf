@@ -25,7 +25,7 @@ data "archive_file" "lambda_node" {
   # Without this, the unrendered template with raw ${...} markers gets
   # zipped into every Node lambda archive, churning source_code_hash
   # any time the validator changes.
-  excludes = ["sync_keys/**", "blackout_sync/**", ".jest-cache/**", "__tests__/**", "*.tftpl"]
+  excludes = ["sync_keys/**", "blackout_sync/**", ".jest-cache/**", "__tests__/**", "test-support/**", "*.tftpl"]
 }
 
 # --- Shared IAM for Lambda logging -------------------------------------

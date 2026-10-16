@@ -27,6 +27,8 @@ data "aws_iam_policy_document" "sync_keys_secret" {
       "secretsmanager:GetSecretValue",
       "secretsmanager:PutSecretValue",
       "secretsmanager:UpdateSecret",
+      "secretsmanager:DescribeSecret",
+      "secretsmanager:UpdateSecretVersionStage",
     ]
     resources = [aws_secretsmanager_secret.signing_key.arn]
   }
@@ -41,7 +43,18 @@ resource "aws_iam_role_policy" "sync_keys_secret" {
 resource "aws_iam_role_policy" "sync_keys_kvs" {
   name   = "kvs-write"
   role   = aws_iam_role.sync_keys.id
-  policy = data.aws_iam_policy_document.kvs_write.json
+  policy = data.aws_iam_policy_document.rotation_kvs.json
+}
+
+data "aws_iam_policy_document" "rotation_kvs" {
+  statement {
+    actions = [
+      "cloudfront-keyvaluestore:DescribeKeyValueStore",
+      "cloudfront-keyvaluestore:GetKey",
+      "cloudfront-keyvaluestore:UpdateKeys",
+    ]
+    resources = [aws_cloudfront_key_value_store.this.arn]
+  }
 }
 
 resource "aws_lambda_function" "sync_keys" {
@@ -53,10 +66,19 @@ resource "aws_lambda_function" "sync_keys" {
   source_code_hash = data.archive_file.lambda_sync_keys.output_base64sha256
   timeout          = 30
 
+  lifecycle {
+    precondition {
+      condition     = var.rotation_propagation_seconds + var.rotation_overlap_seconds + 60 + 60 <= 31449600
+      error_message = "Rotation propagation + overlap + 60s mint cache + 60s in-flight allowance must not exceed 31449600 seconds (364 days), reserving one day of the Standard workflow's one-year limit for tasks and retries."
+    }
+  }
+
   environment {
     variables = {
-      SECRET_NAME = aws_secretsmanager_secret.signing_key.arn
-      KVS_ARN     = aws_cloudfront_key_value_store.this.arn
+      SECRET_NAME                  = aws_secretsmanager_secret.signing_key.arn
+      KVS_ARN                      = aws_cloudfront_key_value_store.this.arn
+      ROTATION_OVERLAP_SECONDS     = tostring(var.rotation_overlap_seconds)
+      ROTATION_PROPAGATION_SECONDS = tostring(var.rotation_propagation_seconds)
     }
   }
 }
@@ -67,7 +89,7 @@ resource "aws_lambda_function" "sync_keys" {
 # to force invocation on each deploy. TF equivalent: aws_lambda_invocation
 # with a CFN-shaped event so the Lambda's existing RequestType branch
 # fires without needing a code change (see source/lambda/sync_keys/index.js
-# — it checks event.RequestType for the CDK path, event.rotate for the
+# — it checks event.RequestType for initialization, event.action for the
 # SFN path). Rerun is keyed on the secret version so a rotation-driven
 # secret change triggers a resync on the next apply.
 resource "aws_lambda_invocation" "initial_key_sync" {
@@ -116,28 +138,61 @@ resource "aws_sfn_state_machine" "rotation" {
   role_arn = aws_iam_role.rotation_sfn.arn
 
   definition = jsonencode({
-    StartAt = "RotateSigningKey"
+    StartAt = "PrepareSigningKey"
     States = {
-      RotateSigningKey = {
+      PrepareSigningKey = {
+        Type       = "Task"
+        Resource   = "arn:aws:states:::lambda:invoke"
+        Next       = "WaitForEdgePropagation"
+        ResultPath = "$.rotation"
+        Parameters = {
+          FunctionName = aws_lambda_function.sync_keys.arn
+          Payload      = { action = "prepare", "executionId.$" = "$$.Execution.Id" }
+        }
+        Retry = [{ ErrorEquals = ["States.TaskFailed"], IntervalSeconds = 2, MaxAttempts = 6, BackoffRate = 2 }]
+      }
+      WaitForEdgePropagation = {
+        Type          = "Wait"
+        TimestampPath = "$.rotation.Payload.propagationReadyTimestamp"
+        Next          = "PromoteMintKey"
+      }
+      PromoteMintKey = {
+        Type       = "Task"
+        Resource   = "arn:aws:states:::lambda:invoke"
+        Next       = "FinalizeOverlap"
+        ResultPath = "$.rotation"
+        Parameters = {
+          FunctionName = aws_lambda_function.sync_keys.arn
+          Payload      = { action = "promote", "executionId.$" = "$$.Execution.Id" }
+        }
+        Retry = [{ ErrorEquals = ["States.TaskFailed"], IntervalSeconds = 2, MaxAttempts = 6, BackoffRate = 2 }]
+      }
+      FinalizeOverlap = {
+        Type       = "Task"
+        Resource   = "arn:aws:states:::lambda:invoke"
+        Next       = "WaitForOverlap"
+        ResultPath = "$.rotation"
+        Parameters = {
+          FunctionName = aws_lambda_function.sync_keys.arn
+          Payload      = { action = "finalize", "executionId.$" = "$$.Execution.Id" }
+        }
+        Retry = [{ ErrorEquals = ["States.TaskFailed"], IntervalSeconds = 2, MaxAttempts = 6, BackoffRate = 2 }]
+      }
+      WaitForOverlap = {
+        Type          = "Wait"
+        TimestampPath = "$.rotation.Payload.cleanupTimestamp"
+        Next          = "RemovePreviousKey"
+      }
+      RemovePreviousKey = {
         Type       = "Task"
         Resource   = "arn:aws:states:::lambda:invoke"
         End        = true
         ResultPath = null
         Parameters = {
           FunctionName = aws_lambda_function.sync_keys.arn
-          Payload      = { rotate = true }
+          Payload      = { action = "cleanup", "executionId.$" = "$$.Execution.Id" }
         }
-        Retry = [{
-          ErrorEquals = [
-            "Lambda.ClientExecutionTimeoutException",
-            "Lambda.ServiceException",
-            "Lambda.AWSLambdaException",
-            "Lambda.SdkClientException",
-          ]
-          IntervalSeconds = 2
-          MaxAttempts     = 6
-          BackoffRate     = 2
-        }]
+        Retry = [{ ErrorEquals = ["States.TaskFailed"], IntervalSeconds = 2, MaxAttempts = 6, BackoffRate = 2 }]
       }
     }
   })
@@ -177,6 +232,7 @@ resource "aws_cloudwatch_event_rule" "rotation_schedule" {
   name                = "${local.name_prefix}-${local.environment}-key-rotation"
   description         = "Trigger CTA signing key rotation on a schedule."
   schedule_expression = var.rotation_schedule
+  state               = var.rotation_enabled ? "ENABLED" : "DISABLED"
 }
 
 resource "aws_cloudwatch_event_target" "rotation_target" {

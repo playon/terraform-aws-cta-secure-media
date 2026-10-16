@@ -59,7 +59,7 @@ function loadValidator(rendered, kvsMap, opts) {
   const stripped = rendered.replace(/^import cf from 'cloudfront';?/m, '');
   const wrapped = `
     var cf = __cfMock;
-    var Buffer = { from: (s) => s };
+    var Buffer = __Buffer;
     ${stripped}
     module.exports = { handler };
   `;
@@ -68,6 +68,7 @@ function loadValidator(rendered, kvsMap, opts) {
   const context = vm.createContext({
     __cfMock: cfMock,
     module,
+    __Buffer: (opts && opts.Buffer) || { from: s => s },
     console: { log: (...args) => logs.push(args.join(' ')) },
     Math,
     Date,
@@ -404,5 +405,67 @@ describe('CTA validator — CATGEOISO3166 (claim 316)', () => {
     });
     const res = await handler(req);
     expect(res.statusCode).toBeUndefined();
+  });
+});
+
+describe('CTA validator signing rotation — real COSE HMAC', () => {
+  const { generateToken, CWT, CAT, CATU, MATCH } = require('../sdk/cta-client');
+  const { validateToken } = require('../test-support/token-crypto');
+  const now = 1700000000;
+  const currentKey = 'rotation-current-key';
+  const previousKey = 'rotation-previous-key';
+  beforeEach(() => jest.spyOn(Date, 'now').mockReturnValue(now * 1000));
+  afterEach(() => jest.restoreAllMocks());
+
+  function requestFor(key, extraClaims = []) {
+    const claims = new Map([[CWT.EXP, now + 3600], [CWT.NBF, now - 1], ...extraClaims]);
+    const token = generateToken(claims, key).toString('base64url');
+    const event = makeRequest();
+    event.request.headers['cta-common-access-token'] = { value: token };
+    return event;
+  }
+  function validator(record, extraKvs = {}) {
+    const keys = { 'key:default': currentKey, ...extraKvs };
+    if (record !== undefined) keys['key:previous'] = typeof record === 'string' ? record : JSON.stringify(record);
+    return loadValidator(render({}), keys, { validateToken, Buffer });
+  }
+
+  test('current key works without a previous record', async () => {
+    const event = requestFor(currentKey);
+    expect(await validator().handler(event)).toBe(event.request);
+  });
+  test.each([null, now + 1])('retained key works for staged/future expiry %p', async expiresAt => {
+    const event = requestFor(previousKey);
+    expect(await validator({ signingKey: previousKey, expiresAt }).handler(event)).toBe(event.request);
+  });
+  test.each([now, now - 1])('retained key stops working at or after its expiry %p', async expiresAt => {
+    const result = await validator({ signingKey: previousKey, expiresAt }).handler(requestFor(previousKey));
+    expect(result.statusCode).toBe(401);
+    expect(result.body).toBe('bad_signature');
+  });
+  test.each(['not-json', previousKey, {}, { signingKey: previousKey }, { signingKey: previousKey, expiresAt: '1700003600' }, { signingKey: '', expiresAt: null }])('malformed record does not permit fallback %p', async record => {
+    expect((await validator(record).handler(requestFor(previousKey))).statusCode).toBe(401);
+  });
+  test('an unrelated signing key is rejected during overlap', async () => {
+    expect((await validator({ signingKey: previousKey, expiresAt: null }).handler(requestFor('unrelated-key'))).statusCode).toBe(401);
+  });
+  test('retained key still enforces token expiry', async () => {
+    const result = await validator({ signingKey: previousKey, expiresAt: null }).handler(requestFor(previousKey, [[CWT.EXP, now - 1]]));
+    expect(result.statusCode).toBe(401);
+    expect(result.body).toBe('expired');
+  });
+  test('retained key still enforces not-before', async () => {
+    const result = await validator({ signingKey: previousKey, expiresAt: null }).handler(requestFor(previousKey, [[CWT.NBF, now + 1000]]));
+    expect(result.statusCode).toBe(401);
+  });
+  test('retained key still enforces revocation', async () => {
+    const result = await validator({ signingKey: previousKey, expiresAt: null }, { 'revoked:session-old': 'revoked' }).handler(requestFor(previousKey, [[CWT.CTI, 'session-old']]));
+    expect(result.statusCode).toBe(410);
+    expect(result.body).toBe('token_revoked');
+  });
+  test('retained key still enforces URI restrictions', async () => {
+    const restriction = new Map([[CATU.PATH, new Map([[MATCH.PREFIX, '/other/']])]]);
+    const result = await validator({ signingKey: previousKey, expiresAt: null }).handler(requestFor(previousKey, [[CAT.CATU, restriction]]));
+    expect(result.statusCode).toBe(401);
   });
 });
